@@ -1,0 +1,32 @@
+# build
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.a
+*.so
+
+# python env
+.venv/
+
+# large artifacts / datasets
+vecbin_full/
+out/
+arxiv_data/
+*.vecbin
+*.bin
+*.zarr
+*.json
+*.jsonl
+*.csv
+results*/
+*.log
+scripts/export_vecbin.py
+scripts/compare_vecbin_values.py
+scripts/verify_vecbin_format.py
+remote_setup.md
+result.md
+To_do.md
