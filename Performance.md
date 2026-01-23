@@ -168,8 +168,6 @@ Figure 4. Effective bandwidth vs thread count (500K, FP16, OMP). Bandwidth incre
 
 Interpretation. FP16 reduces bytes/query by 2× relative to FP32, so the scan becomes bandwidth-limited sooner. After ~8 threads, increasing thread count provides little additional bandwidth, indicating that further throughput gains require reducing data movement (bytes/query) rather than adding CPU parallelism.
 
-(Optional) Table placeholder: If you want, place the underlying OMP FP16 thread sweep table here (Avg/QPS/BW for 1/2/4/8/12/16/20).
-Table can be sourced from figure2.csv.
 
 4.2 FP16 throughput at a fixed 8 threads (POOL vs OMP across sizes)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/qps_comparison_8threads_dark.png"> <img src="performance_images/qps_comparison_8threads_light.png"> </picture>
@@ -188,8 +186,6 @@ Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
 
 Interpretation. With FP16 bases, both POOL and OMP at 8 threads reach ~42–45 GB/s effective bandwidth across sizes. Differences in QPS are small, indicating both methods are bounded by the same memory subsystem. At larger working sets (1M/2.9M), OMP slightly improves bandwidth utilization and tail latency (p95/p99), while POOL remains competitive but shows higher tail in some runs.
 
-If you want FP32 vs FP16 headline: add a second table row block (FP32 @ 8 threads) and compute the FP16/FP32 QPS ratio per size.
-(Leave blank until you add FP32@8 measurements.)
 
 4.3 Hybrid (Alder Lake) “sweet spot”: more threads can worsen tail latency
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/stability_qps_dark.png"> <img src="performance_images/stability_qps_light.png"> </picture>
