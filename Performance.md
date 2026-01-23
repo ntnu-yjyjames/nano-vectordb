@@ -257,7 +257,7 @@ To test whether tile granularity affects performance under batching, we swept ti
 |      1024 |         16.501 | 60.604 |         66.002 |         74.511 |         77.026 |
 |      2048 |         16.433 | 60.852 |         65.734 |         74.688 |         77.909 |
 
-Table P5-1. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
+Table 8. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
 
 tile_vecs	Avg_query (ms)	QPS	Avg_batch (ms)	batch_p95 (ms)	batch_p99 (ms)
 512	16.381	61.047	65.523	73.087	77.574
@@ -295,7 +295,7 @@ Figure P5-3b: Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 |            16 |         14.462 | 69.145 |         57.849 |         62.358 |         64.664 |           250 |
 |            32 |         13.916 | 71.861 |         55.663 |         58.819 |         61.084 |           250 |
 
-Table P5-2. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+Table 9. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
 At tile_vecs=512, software prefetching shows no consistent throughput improvement. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while prefetch_dist=32 is statistically similar to the no-prefetch baseline.
 
@@ -314,7 +314,11 @@ Interpretation. With batching+tiling, the scan is already a sequential streaming
 |            16 |         14.856 | 67.313 |         59.424 |         67.655 |         71.783 |           250 |
 |            32 |         13.909 | 71.897 |         55.635 |         59.026 |         60.482 |           250 |
 |            64 |         13.993 | 71.464 |         55.972 |         59.289 |         59.906 |           250 |
-Table P5-3. Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+
+
+Table 10 . Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+
+
 To stress cache behavior further, we repeated the sweep at tile_vecs=8192. Most distances remain close to the baseline, but an intermediate distance (prefetch_dist=16) significantly degrades performance and tail latency.
 
 prefetch_dist=0: 71.441 QPS, batch_p99 61.656 ms
