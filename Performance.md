@@ -38,7 +38,7 @@ Figure 1. Average per-query latency vs dataset size (log scale). ST increases ro
 Across all dataset sizes, the single-thread baseline scales approximately linearly with the number of vectors, indicating that end-to-end runtime is dominated by scanning the embedding matrix. In contrast, the parallel variants (OMP/ASYNC/POOL) remain tightly clustered and track each other across sizes, suggesting that once parallelized, performance is primarily constrained by the platform’s memory subsystem rather than compute throughput.
 
 
-Table 1a. 500K vectors
+
 | Mode      | Threads | Avg (ms/q) |    QPS |     p95 |     p99 | speedup vs ST |
 | --------- | ------: | ---------: | -----: | ------: | ------: | ------------: |
 | **st**    |       1 |     95.157 | 10.509 | 100.008 | 103.426 |         1.00× |
@@ -46,7 +46,8 @@ Table 1a. 500K vectors
 | **async** |      20 |     17.541 | 57.010 |  18.589 |  19.869 |     **5.43×** |
 | **pool**  |      20 |     17.674 | 56.581 |  20.303 |  20.921 |     **5.39×** |
 
-Table 1b. 1M vectors
+Table 1a. 500K vectors
+
 | Mode      | Threads | Avg (ms/q) |    QPS |     p95 |     p99 | speedup vs ST |
 | --------- | ------: | ---------: | -----: | ------: | ------: | ------------: |
 | **st**    |       1 |    188.154 |  5.315 | 198.317 | 202.579 |         1.00× |
@@ -54,7 +55,8 @@ Table 1b. 1M vectors
 | **async** |      20 |     36.209 | 27.617 |  39.622 |  40.650 |     **5.19×** |
 | **pool**  |      20 |     37.279 | 26.824 |  43.026 |  46.829 |     **5.05×** |
 
-Table 1c. 2.9M vectors(full set)
+Table 1b. 1M vectors
+
 | Mode      | Threads | Avg (ms/q) |   QPS |     p95 |     p99 | speedup vs ST |
 | --------- | ------: | ---------: | ----: | ------: | ------: | ------------: |
 | **st**    |       1 |    539.941 | 1.852 | 559.633 | 566.441 |         1.00× |
@@ -62,6 +64,7 @@ Table 1c. 2.9M vectors(full set)
 | **async** |      20 |    104.246 | 9.593 | 110.408 | 114.750 |     **5.18×** |
 | **pool**  |      20 |    105.285 | 9.498 | 120.553 | 124.335 |     **5.13×** |
 
+Table 1c. 2.9M vectors(full set)
 ### 2.2 Speedup plateaus around ~5×, indicating bandwidth saturation
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="performance_images/speedup_final_dark.png">
@@ -71,13 +74,13 @@ Figure 2. Speedup relative to ST vs dataset size. All parallel variants converge
 
 Despite increasing dataset size, speedup for OMP/ASYNC/POOL remains in a narrow band (~5×). This stability strongly suggests a memory-bandwidth–limited regime: once the scan saturates effective memory bandwidth, additional parallelism provides diminishing returns. In other words, the bottleneck shifts from compute to data movement (RAM → cache → core).
 
-Table 2. speedup
 | Dataset | OMP speedup | ASYNC speedup | POOL speedup |
 | ------- | ----------: | ------------: | -----------: |
 | 500K    |      4.92×    |    **5.43×**    |    5.39×   |
 | 1M      |     **5.23×**   |      5.19× |     5.05×   |
 | 2.9M    |   4.92×   |  **5.18×**   |    5.13×     |
 
+Table 2. speedup
 
 ### 2.3 Tail stability differs by runtime strategy (p99 / Avg)
 <picture>
@@ -88,13 +91,15 @@ Figure 3. Tail stability measured as p99 / Avg (lower is better). This highlight
 
 While average latency for OMP/ASYNC/POOL is similar at each dataset size, tail behavior varies. ASYNC tends to maintain a relatively tight p99/Avg ratio across sizes, whereas OMP and POOL show larger fluctuations at certain dataset sizes. This indicates that at large working-set sizes, system-level effects (scheduler noise, memory-channel contention, page/cache behavior) can meaningfully impact tail latency even when average throughput is bandwidth-limited.
 
-Table 3. Tail stability
+
 | Dataset | OMP p99/Avg | ASYNC p99/Avg | POOL p99/Avg |
 | ------- | ----------: | ------------: | -----------: |
 | 500K    |25.418|**19.869**|  20.921|
 | 1M      |**39.573** |40.650|46.829 |
 | 2.9M    | 123.672|**114.750**|124.335|
 
+
+Table 3. Tail stability
 ### 2.4 Key takeaway
 
 With 20-way parallelism, flat scan achieves a stable ~5× speedup from 500K to 2.9M vectors, implying that performance is largely bounded by effective memory bandwidth rather than compute. Therefore, further gains will likely require reducing bytes/query (e.g., quantization, compression, or ANN pruning) rather than increasing thread count.
@@ -111,7 +116,7 @@ Overall, both implementations scale strongly up to 8 threads (POOL: 10.4 → 43.
 
 > Recommended setting (500K): POOL at 16 threads (or 12) provides near-peak throughput with minimal incremental benefit from higher thread counts.
 
-Table 4a. 500K — POOL thread scaling
+
 | threads | Avg (ms/q) |    QPS | speedup vs 1 |
 | ------: | ---------: | -----: | -----------: |
 |       1 |     96.141 | 10.401 |        1.00× |
@@ -122,7 +127,8 @@ Table 4a. 500K — POOL thread scaling
 |      16 |     17.120 | 58.413 |    **5.62×** |
 |      20 |     17.587 | 56.860 |        5.47× |
 
-Table 4a. 500K — ASYNC thread scaling
+Table 4a. 500K — POOL thread scaling
+
 | threads | Avg (ms/q) |    QPS | speedup vs 1 |
 | ------: | ---------: | -----: | -----------: |
 |       1 |     99.346 | 10.066 |        1.00× |
@@ -133,6 +139,7 @@ Table 4a. 500K — ASYNC thread scaling
 |      16 |     17.822 | 56.112 |    **5.58×** |
 |      20 |     18.231 | 54.852 |        5.45× |
 
+Table 4a. 500K — ASYNC thread scaling
 
 ### 2.6 AVX2/FMA Microbenchmark (Compute-bound → Bandwidth-bound)
 
@@ -144,13 +151,14 @@ Figure 5. AVX2 effects on latency and bandwidth (500K)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/unified_b_bw_dark.png"> <img src="performance_images/unified_b_bw_light.png"> </picture>
 (b) Memory bandwidth utilization. In ST (1 thread), AVX2+FMA raises effective bandwidth from 8.2 → 22.7 GB/s. In POOL@16, both scalar and AVX2+FMA reach essentially the same bandwidth (~44.4 GB/s), matching the observed memory ceiling.
 
-Table 5. SIMD impact under different bottleneck regimes (500K vectors)
 | Setting             | Mode | Threads | Avg (ms/q) |    QPS | p95 (ms) | p99 (ms) | bytes/query | Effective BW (GB/s) |
 | ------------------- | ---- | ------: | ---------: | -----: | -------: | -------: | ----------: | ------------------: |
 | **Scalar (forced)** | ST   |       1 |     93.585 | 10.686 |   95.503 |  104.690 | 768,000,000 |               8.206 |
 | **AVX2+FMA (auto)** | ST   |       1 |     33.898 | 29.501 |   34.442 |   34.712 | 768,000,000 |              22.656 |
 | **Scalar (forced)** | POOL |      16 |     17.288 | 57.842 |   17.842 |   18.241 | 768,000,000 |              44.423 |
 | **AVX2+FMA (auto)** | POOL |      16 |     17.307 | 57.782 |   17.841 |   17.926 | 768,000,000 |              44.376 |
+
+Table 5. SIMD impact under different bottleneck regimes (500K vectors)
 
 #### Interpretation
 
@@ -173,8 +181,6 @@ Interpretation. FP16 reduces bytes/query by 2× relative to FP32, so the scan be
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/qps_comparison_8threads_dark.png"> <img src="performance_images/qps_comparison_8threads_light.png"> </picture>
 Figure 5. FP16 throughput comparison at 8 threads across dataset sizes. POOL and OMP achieve similar QPS at 500K, and remain close at 1M and 2.9M, consistent with both being constrained by the same memory ceiling.
 
-Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
-
 | Dataset | Method | Threads | Avg (ms/q) |     QPS | p95 (ms) | p99 (ms) |   bytes/query | Effective BW (GB/s) |
 | ------- | ------ | ------: | ---------: | ------: | -------: | -------: | ------------: | ------------------: |
 | 500K    | POOL   |       8 |      8.578 | 116.574 |    8.900 |    9.239 |   384,000,000 |              44.765 |
@@ -183,6 +189,8 @@ Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
 | 1M      | OMP    |       8 |     17.423 |  57.395 |   18.373 |   18.744 |   768,000,000 |              44.079 |
 | 2.9M    | POOL   |       8 |     51.445 |  19.438 |   54.710 |   56.109 | 2,229,545,472 |              43.339 |
 | 2.9M    | OMP    |       8 |     50.451 |  19.821 |   51.174 |   51.906 | 2,229,545,472 |              44.193 |
+
+Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
 
 Interpretation. With FP16 bases, both POOL and OMP at 8 threads reach ~42–45 GB/s effective bandwidth across sizes. Differences in QPS are small, indicating both methods are bounded by the same memory subsystem. At larger working sets (1M/2.9M), OMP slightly improves bandwidth utilization and tail latency (p95/p99), while POOL remains competitive but shows higher tail in some runs.
 
@@ -196,6 +204,7 @@ Figure 6. 1M FP16 POOL: throughput (QPS) and stability (p99/Avg) vs threads. 8 t
 |       8 |     17.135 | 58.362 |   17.874 |   17.941 |   1.047 |
 |      12 |     18.053 | 55.393 |   18.702 |   18.786 |   1.041 |
 |      16 |     17.856 | 56.005 |   20.209 |   21.561 |   1.208 |
+
 Table 7. 1M FP16 POOL thread sensitivity (k=10, 100 queries)
 
 Interpretation (Hybrid CPU). The i7-12700 (8P + 4E, 20 threads) is a hybrid architecture. Under FP16, bandwidth saturation occurs at relatively low thread counts (often near the P-core count). Increasing threads beyond this point does not improve effective bandwidth and may worsen tail latency due to contention and straggler effects (E-cores and/or SMT siblings). Therefore, for FP16 scans, 8 threads is a robust operating point on this platform.
@@ -285,6 +294,7 @@ Figure P5-3b: Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 |             8 |         14.209 | 70.379 |         56.835 |         61.609 |         62.799 |           250 |
 |            16 |         14.462 | 69.145 |         57.849 |         62.358 |         64.664 |           250 |
 |            32 |         13.916 | 71.861 |         55.663 |         58.819 |         61.084 |           250 |
+
 Table P5-2. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
 At tile_vecs=512, software prefetching shows no consistent throughput improvement. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while prefetch_dist=32 is statistically similar to the no-prefetch baseline.
