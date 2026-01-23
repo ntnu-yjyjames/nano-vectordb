@@ -158,18 +158,18 @@ This experiment highlights a clear bottleneck transition. In the single-thread r
 
 >Takeaway: SIMD is essential for improving low-thread performance and reducing the thread count required to approach saturation; once bandwidth-bound, further improvements must primarily come from reducing bytes/query (e.g., FP16/INT8 quantization/compression) or avoiding full scans (ANN pruning).
 
-####  FP16 Base to Reduce Data Movement (Bandwidth Scaling on Alder Lake)
+##  3. FP16 Base to Reduce Data Movement (Bandwidth Scaling on Alder Lake)
 
 This phase evaluates FP16 base embeddings as a data-movement optimization. Since flat scan becomes memory-bandwidth bound at moderate-to-high parallelism, halving bytes/query should yield near-linear throughput gains once the memory subsystem is saturated. We convert the base matrix from FP32 → FP16 (query vectors remain FP32) and benchmark ST/OMP/ASYNC/POOL with k=10 and 100 queries.
 
-4.1 FP16 reaches bandwidth saturation at low thread counts
+### 3.1 FP16 reaches bandwidth saturation at low thread counts
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/bw_sat_dark.png"> <img  src="performance_images/bw_sat_light.png"> </picture>
 Figure 4. Effective bandwidth vs thread count (500K, FP16, OMP). Bandwidth increases rapidly from 1→4 threads and begins saturating around ~8 threads, remaining near ~39–41 GB/s thereafter. The dashed line indicates the measured peak bandwidth ceiling (~44.4 GB/s).
 
 Interpretation. FP16 reduces bytes/query by 2× relative to FP32, so the scan becomes bandwidth-limited sooner. After ~8 threads, increasing thread count provides little additional bandwidth, indicating that further throughput gains require reducing data movement (bytes/query) rather than adding CPU parallelism.
 
 
-4.2 FP16 throughput at a fixed 8 threads (POOL vs OMP across sizes)
+### 3.2 FP16 throughput at a fixed 8 threads (POOL vs OMP across sizes)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/qps_comparison_8threads_dark.png"> <img src="performance_images/qps_comparison_8threads_light.png"> </picture>
 Figure 5. FP16 throughput comparison at 8 threads across dataset sizes. POOL and OMP achieve similar QPS at 500K, and remain close at 1M and 2.9M, consistent with both being constrained by the same memory ceiling.
 
@@ -187,29 +187,133 @@ Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
 Interpretation. With FP16 bases, both POOL and OMP at 8 threads reach ~42–45 GB/s effective bandwidth across sizes. Differences in QPS are small, indicating both methods are bounded by the same memory subsystem. At larger working sets (1M/2.9M), OMP slightly improves bandwidth utilization and tail latency (p95/p99), while POOL remains competitive but shows higher tail in some runs.
 
 
-4.3 Hybrid (Alder Lake) “sweet spot”: more threads can worsen tail latency
+### 3.3 Hybrid (Alder Lake) “sweet spot”: more threads can worsen tail latency
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/stability_qps_dark.png"> <img src="performance_images/stability_qps_light.png"> </picture>
 Figure 6. 1M FP16 POOL: throughput (QPS) and stability (p99/Avg) vs threads. 8 threads yields the best throughput and stable tail behavior, while 16 threads shows a noticeably higher p99/Avg ratio, indicating degraded tail latency.
 
+| Threads | Avg (ms/q) |    QPS | p95 (ms) | p99 (ms) | p99/Avg |
+| ------: | ---------: | -----: | -------: | -------: | ------: |
+|       8 |     17.135 | 58.362 |   17.874 |   17.941 |   1.047 |
+|      12 |     18.053 | 55.393 |   18.702 |   18.786 |   1.041 |
+|      16 |     17.856 | 56.005 |   20.209 |   21.561 |   1.208 |
 Table 7. 1M FP16 POOL thread sensitivity (k=10, 100 queries)
-
-Threads	Avg (ms/q)	QPS	p95 (ms)	p99 (ms)	p99/Avg
-8	17.135	58.362	17.874	17.941	1.047
-12	18.053	55.393	18.702	18.786	1.041
-16	17.856	56.005	20.209	21.561	1.208
 
 Interpretation (Hybrid CPU). The i7-12700 (8P + 4E, 20 threads) is a hybrid architecture. Under FP16, bandwidth saturation occurs at relatively low thread counts (often near the P-core count). Increasing threads beyond this point does not improve effective bandwidth and may worsen tail latency due to contention and straggler effects (E-cores and/or SMT siblings). Therefore, for FP16 scans, 8 threads is a robust operating point on this platform.
 
-4.4 Engineering note: affinity pitfalls in remote/hybrid environments
+### 3.4 Engineering note: affinity pitfalls in remote/hybrid environments
 
 We observed that remote/session-level affinity constraints (e.g., CRD/systemd/cgroup) can silently restrict the process to a small CPU set, causing severe underutilization of memory bandwidth (e.g., dropping from ~44 GB/s to ~16–27 GB/s). For reproducibility, benchmarks should record and control CPU affinity (e.g., taskset -pc <pid>), and pinning policies should be core-aware on hybrid CPUs. Our POOL implementation mitigates this by using sysfs CPU topology metadata to select an appropriate core set.
 
-4.5 Takeaways
+### 3.5 Takeaways
 
 FP16 halves bytes/query, enabling near-linear throughput gains once the scan is bandwidth-limited.
-
 On Alder Lake hybrid CPUs, FP16 shifts saturation to fewer threads (often around the P-core count).
-
 Beyond saturation, adding threads can increase tail latency without improving effective bandwidth.
-
 Reliable benchmarking requires explicit attention to affinity/pinning, especially in remote or hybrid environments.
+
+##  4. Query Batching, Cache Tiling, and Tail Behavior (Fullset FP16, 2.9M)
+
+We extend Phase 4 by introducing query batching: processing multiple queries (batch size batch_q) while streaming the base matrix once, thereby amortizing memory traffic across queries that share hot cache lines. In this section, we report Avg_query and batch-level p99 latency (Route A), where percentiles are computed over batch runtimes (batch_samples = ceil(Q / batch_q)), and note that the derived payload_equiv_bandwidth_GBps can exceed DRAM peak due to cache reuse.
+
+### 4.1 Query batching: throughput scales strongly with batch size
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_QPS_dark.png"> <img src="performance_images/QB_QPS_light.png"> </picture>
+Figure 7. QPS vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+
+Both POOL and OMP benefit from batching, but OMP achieves substantially higher throughput at larger batch sizes.
+
+OMP@8: 20.3 → 40.0 → 71.1 → 102.8 QPS for batch_q = 1/2/4/8
+
+POOL@8: 20.1 → 37.2 → 61.4 → 67.2 QPS for batch_q = 1/2/4/8
+
+Interpretation. Batching reduces redundant streaming of the base matrix across queries and shifts the bottleneck away from DRAM bandwidth. OMP continues scaling to batch_q=8, while POOL shows earlier saturation from batch_q=4→8, indicating higher overheads (thread management, local Top-k maintenance, and merge costs) in the bench-side POOL batching implementation.
+
+### 4.2 Tail behavior: batch-level p99 decreases with batching, OMP is consistently tighter
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_P99_dark.png"> <img src="performance_images/QB_P99_light.png"> </picture>
+Figure 8. Batch-level p99 vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+Batching not only increases throughput but also substantially reduces batch-level p99 compared to batch_q=1. OMP remains consistently tighter than POOL.
+
+OMP@8 p99 (batch ms): 52.0 → 26.7 → 15.2 → 14.0
+
+POOL@8 p99 (batch ms): 55.0 → 28.9 → 19.5 → 17.9
+
+Interpretation. Larger batches increase compute work per streamed base tile, but also increase reuse within cache/LLC, lowering batch completion time and thus batch-level tail latency. The OMP implementation achieves lower p99 at the same batch size, suggesting more efficient parallel scheduling and/or lower merge overhead compared with the bench-side POOL batching path.
+
+### 4.3 Cache tiling sensitivity (POOL@8, batch_q=4)
+
+To test whether tile granularity affects performance under batching, we swept tile_vecs ∈ {512, 1024, 2048} at fixed batch_q=4 (Fullset FP16, POOL@8). Results show negligible sensitivity across this range.
+
+| tile_vecs | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) |
+| --------: | -------------: | -----: | -------------: | -------------: | -------------: |
+|       512 |         16.381 | 61.047 |         65.523 |         73.087 |         77.574 |
+|      1024 |         16.501 | 60.604 |         66.002 |         74.511 |         77.026 |
+|      2048 |         16.433 | 60.852 |         65.734 |         74.688 |         77.909 |
+
+Table P5-1. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
+
+tile_vecs	Avg_query (ms)	QPS	Avg_batch (ms)	batch_p95 (ms)	batch_p99 (ms)
+512	16.381	61.047	65.523	73.087	77.574
+1024	16.501	60.604	66.002	74.511	77.026
+2048	16.433	60.852	65.734	74.688	77.909
+
+Interpretation. With query batching enabled, performance is largely dominated by query reuse and merge/overhead rather than tile granularity in the tested range. We therefore adopt tile_vecs=1024 as a stable default.
+
+### 4.4 Takeaways
+
+Batching provides multi-× throughput gains on the 2.9M FP16 workload: up to ~5.1× for OMP@8 (batch_q=8) and ~3.3× for POOL@8.
+
+Batch-level p99 drops sharply with batching, indicating improved tail behavior under cache reuse.
+
+OMP batching outperforms POOL batching at larger batch sizes, implying that once DRAM traffic is amortized, implementation overheads (merge/scheduling) dominate.
+
+payload_equiv_bandwidth_GBps may exceed DRAM peak under batching because it is computed from payload bytes/query and Avg_query; this reflects cache reuse, not physical DRAM bandwidth.
+
+## 4B. Software Prefetch Experiments (OMP@8, Fullset FP16)
+
+After enabling query batching and cache tiling, we evaluated explicit software prefetching to further reduce cache-miss latency during the base scan. We instrumented the inner loop with __builtin_prefetch targeting row vi + prefetch_dist and swept prefetch_dist under two tiling regimes while keeping all other parameters fixed (batch_q=4, Q=1000, OMP@8, FP16 fullset). We report Avg_query, QPS, and batch-level tail latency (Route A; percentiles over batch_samples = ceil(Q/batch_q)).
+
+### 4B.1 Prefetch sweep (tile_vecs=512)
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_QPS_dark.png"> <img src="performance_images/P5_3_QPS_light.png"> </picture>
+Figure P5-3a: QPS vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_P99_dark.png"> <img src="performance_images/P5_3_P99_light.png"> </picture>
+Figure P5-3b: Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+
+| prefetch_dist | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) | batch_samples |
+| ------------: | -------------: | -----: | -------------: | -------------: | -------------: | ------------: |
+|             0 |         13.919 | 71.845 |         55.676 |         59.530 |         59.916 |           250 |
+|             8 |         14.209 | 70.379 |         56.835 |         61.609 |         62.799 |           250 |
+|            16 |         14.462 | 69.145 |         57.849 |         62.358 |         64.664 |           250 |
+|            32 |         13.916 | 71.861 |         55.663 |         58.819 |         61.084 |           250 |
+Table P5-2. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+
+At tile_vecs=512, software prefetching shows no consistent throughput improvement. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while prefetch_dist=32 is statistically similar to the no-prefetch baseline.
+
+prefetch_dist=0: 71.845 QPS, batch_p99 59.916 ms
+prefetch_dist=8: 70.379 QPS, batch_p99 62.799 ms
+prefetch_dist=16: 69.145 QPS, batch_p99 64.664 ms
+prefetch_dist=32: 71.861 QPS, batch_p99 61.084 ms
+
+Interpretation. With batching+tiling, the scan is already a sequential streaming pattern well served by hardware prefetchers and cache reuse. Software prefetching is non-monotonic: poorly tuned distances can introduce cache pollution or unnecessary memory traffic, degrading both throughput and tail latency. Differences at prefetch_dist=32 are within run-to-run variance and do not indicate a robust gain.
+
+### 4C.2 Prefetch sweep under larger tiles (tile_vecs=8192)
+
+| prefetch_dist | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) | batch_samples |
+| ------------: | -------------: | -----: | -------------: | -------------: | -------------: | ------------: |
+|             0 |         13.998 | 71.441 |         55.991 |         60.090 |         61.656 |           250 |
+|            16 |         14.856 | 67.313 |         59.424 |         67.655 |         71.783 |           250 |
+|            32 |         13.909 | 71.897 |         55.635 |         59.026 |         60.482 |           250 |
+|            64 |         13.993 | 71.464 |         55.972 |         59.289 |         59.906 |           250 |
+Table P5-3. Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+To stress cache behavior further, we repeated the sweep at tile_vecs=8192. Most distances remain close to the baseline, but an intermediate distance (prefetch_dist=16) significantly degrades performance and tail latency.
+
+prefetch_dist=0: 71.441 QPS, batch_p99 61.656 ms
+prefetch_dist=32: 71.897 QPS, batch_p99 60.482 ms
+prefetch_dist=64: 71.464 QPS, batch_p99 59.906 ms
+prefetch_dist=16: 67.313 QPS, batch_p99 71.783 ms
+
+Interpretation. Even under larger tiles, software prefetch does not provide a stable improvement. The strong regression at prefetch_dist=16 reinforces that prefetch tuning can be counterproductive, and that once batching amortizes DRAM traffic, performance is dominated by reuse/overheads rather than miss-latency hiding.
+
+### 4C.3 Takeaway
+
+On top of batching+tiling, explicit software prefetching provides negligible additional benefit and may worsen tail latency depending on the chosen distance. We therefore keep prefetch_dist=0 in subsequent experiments and prioritize higher-impact optimizations (e.g., INT8 quantization or pruning/ANN).

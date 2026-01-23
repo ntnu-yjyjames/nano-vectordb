@@ -29,20 +29,27 @@ void VectorDataset::load(const std::string& path) {
   dim_ = 0;
   dtype_ = static_cast<uint32_t>(DType::Float32);
   data_offset_ = 0;
+
   vectors_f32_ = nullptr;
   vectors_f16_ = nullptr;
+  vectors_i8_  = nullptr;
+  scales_i8_   = nullptr;
 
   // --- Try vecbin64 format (64B header) ---
   if (mm_.size() >= sizeof(VecbinHeader)) {
     const auto* h = reinterpret_cast<const VecbinHeader*>(mm_.data());
+
+    const bool dtype_ok =
+      (h->dtype == static_cast<uint32_t>(DType::Float32)) ||
+      (h->dtype == static_cast<uint32_t>(DType::Float16)) ||
+      (h->dtype == static_cast<uint32_t>(DType::Int8));
 
     const bool header_ok =
       (h->magic == kMagic) &&
       (h->version == kVersion) &&
       (h->dim > 0) &&
       (h->count > 0) &&
-      (h->dtype == static_cast<uint32_t>(DType::Float32) ||
-       h->dtype == static_cast<uint32_t>(DType::Float16));
+      dtype_ok;
 
     if (header_ok) {
       dim_ = h->dim;
@@ -50,19 +57,39 @@ void VectorDataset::load(const std::string& path) {
       dtype_ = h->dtype;
       data_offset_ = sizeof(VecbinHeader);
 
-      const size_t expect = sizeof(VecbinHeader) + bytes_for_vectors_typed(count_, dim_, dtype_);
+      // payload size = vectors + optional aux (int8 scales)
+      const size_t vec_bytes = bytes_for_vectors_typed(count_, dim_, dtype_);
+      const size_t aux_bytes =
+        (dtype_ == static_cast<uint32_t>(DType::Int8))
+          ? (static_cast<size_t>(count_) * sizeof(float))   // per-row scale
+          : 0;
+
+      const size_t expect = sizeof(VecbinHeader) + vec_bytes + aux_bytes;
       if (mm_.size() != expect) {
         throw std::runtime_error("VecbinHeader ok but file size mismatch");
       }
 
       const uint8_t* payload = mm_.data() + data_offset_;
+
+      // Route pointers based on dtype
       if (dtype_ == static_cast<uint32_t>(DType::Float32)) {
         vectors_f32_ = reinterpret_cast<const float*>(payload);
         vectors_f16_ = nullptr;
-      } else { // Float16
+        vectors_i8_  = nullptr;
+        scales_i8_   = nullptr;
+      } else if (dtype_ == static_cast<uint32_t>(DType::Float16)) {
         vectors_f16_ = reinterpret_cast<const uint16_t*>(payload);
         vectors_f32_ = nullptr;
+        vectors_i8_  = nullptr;
+        scales_i8_   = nullptr;
+      } else { // Int8 + scales
+        vectors_i8_ = reinterpret_cast<const int8_t*>(payload);
+        scales_i8_  = reinterpret_cast<const float*>(payload + vec_bytes);
+
+        vectors_f32_ = nullptr;
+        vectors_f16_ = nullptr;
       }
+
       return;
     }
   }
@@ -87,6 +114,8 @@ void VectorDataset::load(const std::string& path) {
 
   vectors_f32_ = reinterpret_cast<const float*>(mm_.data() + data_offset_);
   vectors_f16_ = nullptr;
+  vectors_i8_  = nullptr;
+  scales_i8_   = nullptr;
 }
 
 const float* VectorDataset::vector_ptr_f32(uint64_t i) const {
@@ -103,6 +132,22 @@ const uint16_t* VectorDataset::vector_ptr_f16(uint64_t i) const {
   }
   if (i >= count_) throw std::runtime_error("Index out of range");
   return vectors_f16_ + static_cast<size_t>(i) * static_cast<size_t>(dim_);
+}
+
+const int8_t* VectorDataset::vector_ptr_i8(uint64_t i) const {
+  if (dtype_ != static_cast<uint32_t>(DType::Int8) || !vectors_i8_) {
+    throw std::runtime_error("Dataset is not int8");
+  }
+  if (i >= count_) throw std::runtime_error("Index out of range");
+  return vectors_i8_ + static_cast<size_t>(i) * static_cast<size_t>(dim_);
+}
+
+const float* VectorDataset::scale_ptr_i8(uint64_t i) const {
+  if (dtype_ != static_cast<uint32_t>(DType::Int8) || !scales_i8_) {
+    throw std::runtime_error("Dataset is not int8 (scales missing)");
+  }
+  if (i >= count_) throw std::runtime_error("Index out of range");
+  return scales_i8_ + static_cast<size_t>(i);
 }
 
 } // namespace nvdb

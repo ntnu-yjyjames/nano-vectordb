@@ -56,3 +56,6 @@ target_link_libraries(nvdb_bench PRIVATE nvdb)
 
 add_executable(nvdb_convert_f16 tools/nvdb_convert_f16.cpp)
 target_link_libraries(nvdb_convert_f16 PRIVATE nvdb)
+
+add_executable(nvdb_quantize_i8  apps/nvdb_quantize_i8.cpp)
+target_link_libraries(nvdb_quantize_i8 PRIVATE nvdb)

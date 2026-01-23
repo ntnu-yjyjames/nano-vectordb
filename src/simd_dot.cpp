@@ -134,7 +134,83 @@ namespace nvdb {
     for (uint32_t i = 0; i < dim; ++i) s += double(q_f32[i]) * double(f16_to_f32_scalar(x_f16[i]));
     return float(s);
   }
+  
 
 } // namespace nvdb
 
+#include <cmath>   // for std::lrintf (if you use), not required here
+#include <cstring>
+
+#if defined(__GNUC__) || defined(__clang__)
+  #include <immintrin.h>
+#endif
+
+namespace nvdb {
+
+// scalar fallback
+static inline float dot_f32_i8_scalar(const float* q, const int8_t* x, uint32_t dim, float scale) {
+  double acc = 0.0;
+  for (uint32_t i = 0; i < dim; ++i) {
+    acc += double(q[i]) * double(x[i]);
+  }
+  return float(acc * double(scale));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+static float dot_f32_i8_avx2(const float* q, const int8_t* x, uint32_t dim, float scale) {
+  __m256 acc = _mm256_setzero_ps();
+  uint32_t i = 0;
+
+  for (; i + 16 <= dim; i += 16) {
+    // load 16 int8
+    __m128i bx = _mm_loadu_si128(reinterpret_cast<const __m128i*>(x + i));
+
+    // sign-extend 16x int8 -> 16x int16 (stored in 256-bit)
+    __m256i x16 = _mm256_cvtepi8_epi16(bx);
+
+    // lower 8 int16 -> 8 int32
+    __m128i x16_lo = _mm256_castsi256_si128(x16);
+    __m256i x32_lo = _mm256_cvtepi16_epi32(x16_lo);
+    __m256 xf_lo = _mm256_cvtepi32_ps(x32_lo);
+    __m256 qf_lo = _mm256_loadu_ps(q + i);
+    acc = _mm256_fmadd_ps(qf_lo, xf_lo, acc);
+
+    // upper 8 int16 -> 8 int32
+    __m128i x16_hi = _mm256_extracti128_si256(x16, 1);
+    __m256i x32_hi = _mm256_cvtepi16_epi32(x16_hi);
+    __m256 xf_hi = _mm256_cvtepi32_ps(x32_hi);
+    __m256 qf_hi = _mm256_loadu_ps(q + i + 8);
+    acc = _mm256_fmadd_ps(qf_hi, xf_hi, acc);
+  }
+
+  // horizontal sum acc
+  __m128 lo = _mm256_castps256_ps128(acc);
+  __m128 hi = _mm256_extractf128_ps(acc, 1);
+  __m128 sum = _mm_add_ps(lo, hi);
+  sum = _mm_hadd_ps(sum, sum);
+  sum = _mm_hadd_ps(sum, sum);
+  float out = _mm_cvtss_f32(sum);
+
+  // tail
+  for (; i < dim; ++i) out += q[i] * float(x[i]);
+
+  return out * scale;
+}
+#endif
+
+float dot_f32_i8base(const float* q_f32, const int8_t* x_i8, uint32_t dim, float scale) {
+  if (g_force_scalar.load(std::memory_order_relaxed)) {
+    return dot_f32_i8_scalar(q_f32, x_i8, dim, scale);
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+    return dot_f32_i8_avx2(q_f32, x_i8, dim, scale);
+  }
+#endif
+  return dot_f32_i8_scalar(q_f32, x_i8, dim, scale);
+}
+
+} // namespace nvdb
 
