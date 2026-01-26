@@ -1,11 +1,10 @@
 # Performance Characterization & Bottleneck Analysis
 ## Abstract
-This document presents a comprehensive performance characterization of Nano-VectorDB, a high-performance C++ flat-scan vector search engine designed to study system-level bottlenecks in retrieval-augmented generation (RAG) pipelines. Through controlled benchmarking on the arXiv corpus (up to 2.9M vectors), we show that a custom pinned thread-pool implementation achieves up to a 5.4× speedup over single-threaded baselines, reaching near-saturation of the platform’s effective memory bandwidth (~44 GB/s).
+This document presents a comprehensive performance characterization of **Nano-VectorDB**, a lightweight **C++ vector search benchmark** built to isolate system-level bottlenecks in dense retrieval (RAG-style) workloads. Using 384-D arXiv embeddings (up to **2.9M** vectors), we show that parallel flat-scan quickly becomes **memory-bandwidth bound**: a pinned thread-pool and OpenMP achieve stable multi-core speedups and saturate the platform’s effective bandwidth (**≈ 44–45 GB/s**) at moderate thread counts.
 
-Microbenchmarking further reveals a clear transition from compute-bound to memory-bound execution regimes. In the low-parallelism setting, AVX2+FMA SIMD intrinsics substantially reduce per-query latency and increase effective bandwidth utilization, whereas under high parallelism the system becomes bandwidth-limited, rendering additional compute optimizations ineffective.
+Microbenchmarks further reveal a clear transition from compute-bound to bandwidth-bound regimes. In low parallelism, **AVX2+FMA** substantially reduces dot-product latency and increases bandwidth utilization, while under high parallelism additional compute optimization yields diminishing returns. Motivated by the bandwidth ceiling, we then reduce bytes per query via **FP16** and **INT8(+scale)** base representations. With an AVX2-optimized INT8 scoring kernel, INT8 delivers consistent **~1.8–1.9×** throughput gains over FP16 across 500K/1M/2.9M while preserving **exact top-k** within the quantized scoring space (no ANN pruning).
 
-These results highlight that, beyond a moderate degree of parallelism, flat vector search performance on modern CPUs is fundamentally constrained by data movement rather than arithmetic throughput. Consequently, further gains are more effectively achieved by reducing bytes per query—through techniques such as quantization, compression, or pruning—rather than by increasing thread count alone. Nano-VectorDB thus serves as a focused experimental platform for understanding performance ceilings and design trade-offs in large-scale retrieval systems.
-
+Finally, we establish an **HNSW baseline** and quantify the classic **recall–latency–memory** tradeoff via efSearch and (M, efConstruction) sweeps, providing an ANN reference point against the exact flat-scan ground truth. Overall, the results confirm that flat retrieval performance is fundamentally constrained by **data movement**, and that practical gains come from reducing bytes/query (quantization/compression) or switching to ANN methods with explicit accuracy tradeoffs.
 ## 1. Experimental Setup
 
 To ensure reproducibility and isolate system bottlenecks, all experiments were conducted in a controlled environment:
@@ -98,8 +97,8 @@ While average latency for OMP/ASYNC/POOL is similar at each dataset size, tail b
 | 1M      |**39.573** |40.650|46.829 |
 | 2.9M    | 123.672|**114.750**|124.335|
 
-
 Table 3. Tail stability
+
 ### 2.4 Key takeaway
 
 With 20-way parallelism, flat scan achieves a stable ~5× speedup from 500K to 2.9M vectors, implying that performance is largely bounded by effective memory bandwidth rather than compute. Therefore, further gains will likely require reducing bytes/query (e.g., quantization, compression, or ANN pruning) rather than increasing thread count.
@@ -139,7 +138,7 @@ Table 4a. 500K — POOL thread scaling
 |      16 |     17.822 | 56.112 |    **5.58×** |
 |      20 |     18.231 | 54.852 |        5.45× |
 
-Table 4a. 500K — ASYNC thread scaling
+Table 4b. 500K — ASYNC thread scaling
 
 ### 2.6 AVX2/FMA Microbenchmark (Compute-bound → Bandwidth-bound)
 
@@ -219,37 +218,86 @@ FP16 halves bytes/query, enabling near-linear throughput gains once the scan is 
 On Alder Lake hybrid CPUs, FP16 shifts saturation to fewer threads (often around the P-core count).
 Beyond saturation, adding threads can increase tail latency without improving effective bandwidth.
 Reliable benchmarking requires explicit attention to affinity/pinning, especially in remote or hybrid environments.
+## 3B.  INT8 Base Quantization (AVX2) — Further Reducing Bytes/Query
+
+To extend the FP16-base experiments, we further reduce data movement by quantizing the **base matrix** to INT8 while **keeping queries in FP32**. The INT8 format uses a **per-row scale** (one FP32 value per vector) and stores base vectors as `int8` payload. Scoring uses an **AVX2** kernel that accumulates the `int8` payload via widened int16/int32 intermediates, converts to FP32 for accumulation with FP32 queries, and applies the per-row FP32 scale. This yields a deterministic flat-scan ranking under a quantized dot-product scoring function (i.e., exact top-k within the INT8 scoring space, without ANN pruning), while reducing payload bytes/query relative to FP16. Unless otherwise noted, experiments use 384-D embeddings, k=10, Q=100, and OMP@8 (`OMP_PROC_BIND=close`,` OMP_PLACES=cores`).
+
+
+### 3B.1 INT8 improves throughput across dataset sizes
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P4B_1_Throughput_dark.png"> <img alt="Figure P4B-1: Throughput vs Dataset Size" src="performance_images/P4B_1_Throughput_light.png"> </picture>
+
+Figure 7. Throughput (QPS) vs dataset size comparing FP16 and INT8 bases (OMP@8). INT8 achieves ~1.8–1.9× higher throughput across sizes, approaching the ideal gain expected from reducing bytes/query.
+
+bytes/query counts base-vector payload reads (plus INT8 per-row scale), excluding query reuse and top-k bookkeeping.
+
+
+| Dataset | Base dtype    | Avg_query (ms) |     QPS | p95 (ms) | p99 (ms) |   bytes/query |
+| ------- | ------------- | -------------: | ------: | -------: | -------: | ------------: |
+| 500K    | FP16          |          8.973 | 111.445 |   10.204 |   13.136 |   384,000,000 |
+| 500K    | INT8 (+scale) |          4.753 | 210.414 |    6.428 |    8.732 |   194,000,000 |
+| 1M      | FP16          |         17.220 |  58.073 |   18.010 |   18.380 |   768,000,000 |
+| 1M      | INT8 (+scale) |          9.477 | 105.520 |   11.207 |   12.481 |   388,000,000 |
+| 2.9M    | FP16          |         50.019 |  19.992 |   51.830 |   55.058 | 2,229,545,472 |
+| 2.9M    | INT8 (+scale) |         26.340 |  37.966 |   27.572 |   29.721 | 1,126,384,952 |
+
+
+Table 8. FP16 vs INT8 (OMP@8)
+
+Observed throughput speedup (INT8 vs FP16) is 1.89× (500K), 1.82× (1M),
+and 1.90× (2.9M).
+
+### 3B.2 Payload-equivalent bandwidth stays in the same 42–45 GB/s regime
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P4B_2_Bandwidth_Refined_dark.png"> <img alt="Figure P4B-2: Payload-equivalent Bandwidth vs Dataset Size" src="performance_images/P4B_2_Bandwidth_Refined_light.png"> </picture>
+
+Figure 8. Payload-equivalent bandwidth vs dataset size (OMP@8; y-axis zoomed). Both FP16 and INT8 saturate in the ~42–45 GB/s range, indicating the same bandwidth-saturation regime; INT8 improves QPS primarily by reducing bytes/query rather than increasing physical memory bandwidth.
+
+| Dataset | FP16 BW (GB/s) | INT8 BW (GB/s) |
+| ------- | -------------: | -------------: |
+| 500K    |         42.795 |         40.820 |
+| 1M      |         44.600 |         40.942 |
+| 2.9M    |         44.574 |         42.764 |
+
+
+Table 9. Payload-equivalent bandwidth (OMP@8)
+**Interpretation.** INT8 reduces bytes/query by ~2× relative to FP16 (dim·1B + 4B scale vs dim·2B). Once the scan is bandwidth-limited, throughput increases close to proportionally. The remaining gap to the ideal 2× is attributable to dequantization overhead (int8→float conversion and scaling) and fixed per-query costs (top-k maintenance and parallel overhead). Notably, tail latency (p95/p99) improves substantially under INT8 at large scale, consistent with reduced data movement pressure. This confirms that, once bandwidth-limited, INT8 acts primarily as a data-movement optimization rather than a compute optimization.
+
+### 3B.3 Takeaways
+
+* **INT8(+scale) with an AVX2 kernel delivers consistent ~1.8–1.9× throughput gains over FP16** from 500K to 2.9M vectors under OMP@8.
+* **The bandwidth ceiling stays in the ~42–45 GB/s class**; the improvement is driven by reducing bytes/query, not increasing physical DRAM bandwidth.
+* After vectorization, the INT8 path re-enters a bandwidth-limited regime, where performance scales primarily with bytes/query rather than FLOPs.
 
 ##  4. Query Batching, Cache Tiling, and Tail Behavior (Fullset FP16, 2.9M)
 
-We extend Phase 4 by introducing query batching: processing multiple queries (batch size batch_q) while streaming the base matrix once, thereby amortizing memory traffic across queries that share hot cache lines. In this section, we report Avg_query and batch-level p99 latency (Route A), where percentiles are computed over batch runtimes (batch_samples = ceil(Q / batch_q)), and note that the derived payload_equiv_bandwidth_GBps can exceed DRAM peak due to cache reuse.
+We extend Section 3 by introducing **query batching**: processing multiple queries (batch size `batch_q`) while streaming the base matrix once, thereby amortizing base-matrix streaming cost by reusing hot base tiles while they remain in LLC/cache.  In this section, we report Avg_query and batch-level p99 latency (Route A), where percentiles are computed over batch runtimes (`batch_samples = ceil(Q / batch_q)`), and note that the derived `payload_equiv_bandwidth_GBps` can exceed DRAM peak due to cache reuse.
 
 ### 4.1 Query batching: throughput scales strongly with batch size
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_QPS_dark.png"> <img src="performance_images/QB_QPS_light.png"> </picture>
-Figure 7. QPS vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+Figure 9. QPS vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
 
-Both POOL and OMP benefit from batching, but OMP achieves substantially higher throughput at larger batch sizes.
+Both POOL and OMP benefit from batching, but OMP achieves substantially higher throughput at larger batch sizes. 
 
-OMP@8: 20.3 → 40.0 → 71.1 → 102.8 QPS for batch_q = 1/2/4/8
+* **OMP@8**: 20.3 → 40.0 → 71.1 → 102.8 QPS for batch_q = 1/2/4/8
+* **POOL@8**: 20.1 → 37.2 → 61.4 → 67.2 QPS for batch_q = 1/2/4/8
 
-POOL@8: 20.1 → 37.2 → 61.4 → 67.2 QPS for batch_q = 1/2/4/8
-
-Interpretation. Batching reduces redundant streaming of the base matrix across queries and shifts the bottleneck away from DRAM bandwidth. OMP continues scaling to batch_q=8, while POOL shows earlier saturation from batch_q=4→8, indicating higher overheads (thread management, local Top-k maintenance, and merge costs) in the bench-side POOL batching implementation.
+**Interpretation.** Batching reduces redundant streaming of the base matrix across queries and shifts the bottleneck away from DRAM bandwidth. OMP continues scaling to `batch_q=8`, while POOL shows earlier saturation from `batch_q=4→8`, indicating higher overheads (thread management, local Top-k maintenance, and merge costs) in the bench-side POOL batching implementation. This suggests that once DRAM traffic is amortized, batching performance becomes dominated by software overheads rather than memory bandwidth. This gap is specific to the current batching implementation (merge/overhead), not the pinned-pool design itself.
 
 ### 4.2 Tail behavior: batch-level p99 decreases with batching, OMP is consistently tighter
+
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_P99_dark.png"> <img src="performance_images/QB_P99_light.png"> </picture>
-Figure 8. Batch-level p99 vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
-Batching not only increases throughput but also substantially reduces batch-level p99 compared to batch_q=1. OMP remains consistently tighter than POOL.
 
-OMP@8 p99 (batch ms): 52.0 → 26.7 → 15.2 → 14.0
+Figure 10. Batch-level p99 vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+Batching not only increases throughput but also substantially reduces batch-level p99 compared to `batch_q=1` . OMP remains consistently tighter than POOL.
 
-POOL@8 p99 (batch ms): 55.0 → 28.9 → 19.5 → 17.9
+* **OMP@8 p99 (batch ms)**: 52.0 → 26.7 → 15.2 → 14.0
+* **POOL@8 p99 (batch ms)**: 55.0 → 28.9 → 19.5 → 17.9
 
-Interpretation. Larger batches increase compute work per streamed base tile, but also increase reuse within cache/LLC, lowering batch completion time and thus batch-level tail latency. The OMP implementation achieves lower p99 at the same batch size, suggesting more efficient parallel scheduling and/or lower merge overhead compared with the bench-side POOL batching path.
+**Interpretation.**  Larger batches increase compute work per streamed base tile, but also increase reuse within cache/LLC, lowering batch completion time and thus batch-level tail latency. The OMP implementation achieves lower p99 at the same batch size, suggesting more efficient parallel scheduling and lower merge overhead compared with the bench-side POOL batching path.
+
 
 ### 4.3 Cache tiling sensitivity (POOL@8, batch_q=4)
 
-To test whether tile granularity affects performance under batching, we swept tile_vecs ∈ {512, 1024, 2048} at fixed batch_q=4 (Fullset FP16, POOL@8). Results show negligible sensitivity across this range.
+To test whether tile granularity affects performance under batching, we swept `tile_vecs ∈ {512, 1024, 2048}` at fixed `batch_q=4` (Fullset FP16, POOL@8). Results show negligible sensitivity across this range.
 
 | tile_vecs | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) |
 | --------: | -------------: | -----: | -------------: | -------------: | -------------: |
@@ -257,36 +305,30 @@ To test whether tile granularity affects performance under batching, we swept ti
 |      1024 |         16.501 | 60.604 |         66.002 |         74.511 |         77.026 |
 |      2048 |         16.433 | 60.852 |         65.734 |         74.688 |         77.909 |
 
-Table 8. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
+Table 10. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
 
-tile_vecs	Avg_query (ms)	QPS	Avg_batch (ms)	batch_p95 (ms)	batch_p99 (ms)
-512	16.381	61.047	65.523	73.087	77.574
-1024	16.501	60.604	66.002	74.511	77.026
-2048	16.433	60.852	65.734	74.688	77.909
-
-Interpretation. With query batching enabled, performance is largely dominated by query reuse and merge/overhead rather than tile granularity in the tested range. We therefore adopt tile_vecs=1024 as a stable default.
+**Interpretation.** With query batching enabled, performance is largely dominated by query reuse and merge/overhead rather than tile granularity in the tested range. We therefore adopt **tile_vecs=1024** as a stable default.
 
 ### 4.4 Takeaways
 
-Batching provides multi-× throughput gains on the 2.9M FP16 workload: up to ~5.1× for OMP@8 (batch_q=8) and ~3.3× for POOL@8.
-
-Batch-level p99 drops sharply with batching, indicating improved tail behavior under cache reuse.
-
-OMP batching outperforms POOL batching at larger batch sizes, implying that once DRAM traffic is amortized, implementation overheads (merge/scheduling) dominate.
-
-payload_equiv_bandwidth_GBps may exceed DRAM peak under batching because it is computed from payload bytes/query and Avg_query; this reflects cache reuse, not physical DRAM bandwidth.
+* **Batching provides multi-× throughput gains** on the 2.9M FP16 workload: up to ~5.1× for OMP@8 (batch_q=8) and ~3.3× for POOL@8.
+* **Batch-level p99 drops sharply with batching**, indicating improved tail behavior under cache reuse.
+* **OMP batching outperforms POOL batching** at larger batch sizes, implying that once DRAM traffic is amortized, implementation overheads (merge/scheduling) dominate.
+* `payload_equiv_bandwidth_GBps`may exceed DRAM peak under batching because it is computed from payload bytes/query and Avg_query; this reflects cache reuse, not physical DRAM bandwidth.  Note that `payload_equiv_bandwidth_GBps` is computed from payload bytes/query ÷ Avg_query. Under batching, reused base tiles may be served from LLC, so this metric can exceed DRAM peak; it should be interpreted as an effective payload rate, not physical DRAM bandwidth.
 
 ## 4B. Software Prefetch Experiments (OMP@8, Fullset FP16)
 
-After enabling query batching and cache tiling, we evaluated explicit software prefetching to further reduce cache-miss latency during the base scan. We instrumented the inner loop with __builtin_prefetch targeting row vi + prefetch_dist and swept prefetch_dist under two tiling regimes while keeping all other parameters fixed (batch_q=4, Q=1000, OMP@8, FP16 fullset). We report Avg_query, QPS, and batch-level tail latency (Route A; percentiles over batch_samples = ceil(Q/batch_q)).
+After enabling query batching and cache tiling, we evaluated explicit software prefetching to further reduce cache-miss latency during the base scan. We instrumented the inner loop with `__builtin_prefetch` targeting row `vi + prefetch_dist` and swept `prefetch_dist` under two tiling regimes while keeping all other parameters fixed (`batch_q=4`, Q=1000, OMP@8, FP16 fullset). We report **Avg_query**, QPS, and **batch-level** tail latency (Route A; percentiles over `batch_samples = ceil(Q/batch_q)`).
 
 ### 4B.1 Prefetch sweep (tile_vecs=512)
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_QPS_dark.png"> <img src="performance_images/P5_3_QPS_light.png"> </picture>
-Figure P5-3a: QPS vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+
+Figure 11. QPS vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_P99_dark.png"> <img src="performance_images/P5_3_P99_light.png"> </picture>
-Figure P5-3b: Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+
+Figure 12. Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 
 | prefetch_dist | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) | batch_samples |
 | ------------: | -------------: | -----: | -------------: | -------------: | -------------: | ------------: |
@@ -295,18 +337,18 @@ Figure P5-3b: Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 |            16 |         14.462 | 69.145 |         57.849 |         62.358 |         64.664 |           250 |
 |            32 |         13.916 | 71.861 |         55.663 |         58.819 |         61.084 |           250 |
 
-Table 9. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+Table 11. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
-At tile_vecs=512, software prefetching shows no consistent throughput improvement. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while prefetch_dist=32 is statistically similar to the no-prefetch baseline.
+At `tile_vecs=512`, software prefetching shows **no consistent throughput improvement**. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while `prefetch_dist=32` is statistically similar to the no-prefetch baseline.
 
-prefetch_dist=0: 71.845 QPS, batch_p99 59.916 ms
-prefetch_dist=8: 70.379 QPS, batch_p99 62.799 ms
-prefetch_dist=16: 69.145 QPS, batch_p99 64.664 ms
-prefetch_dist=32: 71.861 QPS, batch_p99 61.084 ms
+* `prefetch_dist=0`: 71.845 QPS, batch_p99 59.916 ms
+* `prefetch_dist=8`: 70.379 QPS, batch_p99 62.799 ms
+* `prefetch_dist=16`: 69.145 QPS, batch_p99 64.664 ms
+* `prefetch_dist=32`: 71.861 QPS, batch_p99 61.084 ms
 
-Interpretation. With batching+tiling, the scan is already a sequential streaming pattern well served by hardware prefetchers and cache reuse. Software prefetching is non-monotonic: poorly tuned distances can introduce cache pollution or unnecessary memory traffic, degrading both throughput and tail latency. Differences at prefetch_dist=32 are within run-to-run variance and do not indicate a robust gain.
+**Interpretation.** With batching+tiling, the scan is already a sequential streaming pattern well served by hardware prefetchers and cache reuse. Software prefetching is non-monotonic: poorly tuned distances can introduce cache pollution or unnecessary memory traffic, degrading both throughput and tail latency. Differences at `prefetch_dist=32 `are within run-to-run variance and do not indicate a robust or reproducible gain.
 
-### 4C.2 Prefetch sweep under larger tiles (tile_vecs=8192)
+### 4B.2 Prefetch sweep under larger tiles (tile_vecs=8192)
 
 | prefetch_dist | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) | batch_samples |
 | ------------: | -------------: | -----: | -------------: | -------------: | -------------: | ------------: |
@@ -316,18 +358,91 @@ Interpretation. With batching+tiling, the scan is already a sequential streaming
 |            64 |         13.993 | 71.464 |         55.972 |         59.289 |         59.906 |           250 |
 
 
-Table 10 . Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+Table 12 . Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
 
-To stress cache behavior further, we repeated the sweep at tile_vecs=8192. Most distances remain close to the baseline, but an intermediate distance (prefetch_dist=16) significantly degrades performance and tail latency.
+To stress cache behavior further, we repeated the sweep at `tile_vecs=8192`. Most distances remain close to the baseline, but an intermediate distance (`prefetch_dist=16`) significantly degrades performance and tail latency.
 
-prefetch_dist=0: 71.441 QPS, batch_p99 61.656 ms
-prefetch_dist=32: 71.897 QPS, batch_p99 60.482 ms
-prefetch_dist=64: 71.464 QPS, batch_p99 59.906 ms
-prefetch_dist=16: 67.313 QPS, batch_p99 71.783 ms
+* `prefetch_dist=0`: 71.441 QPS, batch_p99 61.656 ms
+* `prefetch_dist=32`: 71.897 QPS, batch_p99 60.482 ms
+* `prefetch_dist=64`: 71.464 QPS, batch_p99 59.906 ms
+* `prefetch_dist=16`: 67.313 QPS, batch_p99 71.783 ms
 
-Interpretation. Even under larger tiles, software prefetch does not provide a stable improvement. The strong regression at prefetch_dist=16 reinforces that prefetch tuning can be counterproductive, and that once batching amortizes DRAM traffic, performance is dominated by reuse/overheads rather than miss-latency hiding.
+**Interpretation.** Even under larger tiles, software prefetch does not provide a stable improvement. The strong regression at `prefetch_dist=16` reinforces that prefetch tuning can be counterproductive, and that once batching amortizes DRAM traffic, performance is dominated by reuse/overheads rather than miss-latency hiding.
 
-### 4C.3 Takeaway
+### 4B.3 Takeaway
 
-On top of batching+tiling, explicit software prefetching provides negligible additional benefit and may worsen tail latency depending on the chosen distance. We therefore keep prefetch_dist=0 in subsequent experiments and prioritize higher-impact optimizations (e.g., INT8 quantization or pruning/ANN).
+On top of batching and tiling, explicit software prefetching does not provide a **robust performance benefit** and may **worsen tail latency** depending on the chosen distance. We therefore keep `prefetch_dist=0` in subsequent experiments and prioritize higher-impact optimizations (e.g., INT8 quantization or pruning/ANN).
+
+## 5. HNSW Baseline: Recall–Latency–Memory Tradeoffs
+
+This phase establishes an approximate nearest neighbor (ANN) baseline using HNSW (hnswlib) and quantifies the standard tradeoff between **accuracy (Recall@10)**, **latency (Avg/p99)**, and **index footprint**. Unless otherwise stated, evaluation uses **k=10** and **Q=1000** random queries. Reported latency metrics are **ANN-only** (HNSW search time), and recall is computed against the project’s exact flat-scan ground truth (see `nvdb_hnsw_eval`).
+
+### 5.1 efSearch sweep (500K / 1M / 2.9M)
+
+We sweep `efSearch ∈ {16, 32, 64, 128, 256}` while holding the index build configuration fixed (HNSW M=16; efConstruction as used during index build). Across all dataset sizes, increasing efSearch consistently improves Recall@10 but increases average and tail latency.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_1_Tradeoff_Updated_dark.png"> <img alt="Figure P6-1: Recall vs P99 Latency Tradeoff" src="performance_images/P6_1_Tradeoff_Updated_light.png"> </picture>
+
+Figure 13. Recall@10 vs ANN p99 latency (ms) for efSearch sweeps on 500K / 1M / 2.9M. Higher efSearch improves recall but increases tail latency. The “knee” typically occurs around efSearch≈64, where recall approaches ~0.98–0.99 with sub-millisecond p99.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_2_AvgLatency_V2_dark.png"> <img alt="Figure P6-2: Recall vs Average Latency Tradeoff" src="performance_images/P6_2_AvgLatency_V2_light.png"> </picture>
+
+Figure 14. Recall@10 vs ANN average latency (ms/query). Average latency rises smoothly with efSearch and mirrors the tail trend, with rapidly diminishing returns in recall beyond efSearch≈128.
+
+| Dataset | dtype | efSearch | Recall@10 | ANN Avg (ms) | ANN p95 (ms) | ANN p99 (ms) |   ANN QPS |
+| ------- | ----- | -------: | --------: | -----------: | -----------: | -----------: | --------: |
+| 500K    | FP16  |       16 |    0.8773 |        0.085 |        0.119 |        0.137 | 11781.903 |
+| 500K    | FP16  |       32 |    0.9443 |        0.127 |        0.164 |        0.189 |  7896.519 |
+| 500K    | FP16  |       64 |    0.9795 |        0.208 |        0.264 |        0.325 |  4802.144 |
+| 500K    | FP16  |      128 |    0.9931 |        0.366 |        0.507 |        0.667 |  2734.072 |
+| 500K    | FP16  |      256 |    0.9982 |        0.633 |        0.882 |        1.161 |  1578.958 |
+| 1M      | FP16  |       16 |    0.8961 |        0.090 |        0.122 |        0.143 | 11120.259 |
+| 1M      | FP16  |       32 |    0.9525 |        0.136 |        0.183 |        0.232 |  7375.402 |
+| 1M      | FP16  |       64 |    0.9816 |        0.212 |        0.266 |        0.320 |  4710.107 |
+| 1M      | FP16  |      128 |    0.9942 |        0.371 |        0.502 |        0.687 |  2693.604 |
+| 1M      | FP16  |      256 |    0.9975 |        0.622 |        0.790 |        0.918 |  1608.066 |
+| 2.9M    | FP16  |       16 |    0.9608 |        0.147 |        0.209 |        0.246 |  6785.136 |
+| 2.9M    | FP16  |       32 |    0.9835 |        0.148 |        0.193 |        0.252 |  6768.676 |
+| 2.9M    | FP16  |       64 |    0.9931 |        0.222 |        0.300 |        0.364 |  4306.768 |
+| 2.9M    | FP16  |      128 |    0.9965 |        0.396 |        0.514 |        0.706 |  2522.522 |
+| 2.9M    | FP16  |      256 |    0.9977 |        0.682 |        0.864 |        1.096 |  1466.850 |
+
+Table 13. efSearch sweep (ANN-only latency; k=10, Q=1000)
+
+**Interpretation.** efSearch controls the breadth of candidate exploration at query time. Across sizes, `efSearch=64` provides a strong knee point: recall ≈0.98–0.99 with p99 remaining below ~0.4 ms (ANN-only). Increasing to `efSearch=128–256` yields marginal recall gains but a disproportionate increase in tail latency (p99 approaching or exceeding ~0.7–1.1 ms).
+
+### 5.2 Build parameter sweep (500K): M and efConstruction vs recall/tail/memory (efSearch=64)
+
+To characterize the second major HNSW axis—index construction quality vs search cost—we fixed `efSearch=64 `and swept build parameters `M ∈ {12,16,24}` and efConstruction `∈ {80,200}` on the 500K dataset. We report Recall@10, ANN latency, and the on-disk index size as a proxy for memory footprint. Index size is reported as an on-disk proxy for memory footprint; runtime memory includes additional allocator overhead and is platform-dependent.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_3_BuildConfigs_dark.png"> <img alt="Figure P6-3: Build Configs vs Search Performance" src="performance_images/P6_3_BuildConfigs_light.png"> </picture>
+
+Figure 15. Build configurations (M, efConstruction) plotted as Recall@10 vs ANN p99 at fixed efSearch=64 (500K, FP32 base). Increasing M generally improves recall but increases tail latency.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_4_MemoryRecall_dark.png"> <img alt="Figure P6-4: Recall vs Memory Footprint" src="performance_images/P6_4_MemoryRecall_light.png"> </picture>
+
+Figure 16. Recall@10 vs index size (MB) for build sweeps at efSearch=64. Index size scales primarily with M, while efConstruction mainly affects recall at approximately constant footprint. Labels show ANN p99 latency.
+
+|  M | efConstruction | Recall@10 | ANN Avg (ms) | ANN p95 (ms) | ANN p99 (ms) |  ANN QPS | Index size (MB) | Note                     |
+| -: | -------------: | --------: | -----------: | -----------: | -----------: | -------: | --------------: | ------------------------ |
+| 12 |             80 |    0.9590 |        0.155 |        0.195 |        0.224 | 6436.522 |             789 |                          |
+| 16 |             80 |    0.9665 |        0.184 |        0.237 |        0.293 | 5433.366 |             804 |                          |
+| 24 |             80 |    0.9806 |        0.214 |        0.286 |        0.354 | 4672.351 |             834 |                          |
+| 12 |            200 |    0.9715 |        0.166 |        0.209 |        0.234 | 6015.327 |             789 |                          |
+| 16 |            200 |    0.9796 |        0.215 |        0.308 |        0.379 | 4657.768 |             804 | baseline hnsw_500k.index |
+| 24 |            200 |    0.9892 |        0.248 |        0.312 |        0.347 | 4034.150 |             834 |                          |
+
+Table 14. Build sweep summary (500K FP32 base; efSearch=64; k=10; Q=1000)
+
+**Interpretation.**
+
+* **M dominates footprint**: index size increases with M (≈789 → 804 → 834 MB for M=12/16/24), consistent with a denser neighborhood graph.
+* **efConstruction primarily improves recall**: raising efConstruction from 80→200 increases Recall@10 at essentially unchanged index size (for a fixed M), but may increase query-time cost depending on the resulting graph structure.
+* At fixed efSearch, higher M increases recall but tends to increase ANN latency/tail, illustrating the classic recall–latency–memory tradeoff.
+
+### 5.3 Takeaways
+
+* **efSearch** is the primary runtime knob for accuracy vs tail latency; efSearch≈64 provides a strong knee point for recall@10≈0.98–0.99 with sub-millisecond ANN p99 across 500K–2.9M.
+* **M** primarily controls memory footprint and recall potential: higher M yields higher recall but increases index size and often increases tail latency.
+* **efConstruction** improves graph quality (recall) with little impact on index size for a fixed M, but can shift the recall–latency tradeoff curve.

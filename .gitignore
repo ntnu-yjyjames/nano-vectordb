@@ -30,3 +30,4 @@ scripts/verify_vecbin_format.py
 remote_setup.md
 result.md
 To_do.md
+hnsw_index/

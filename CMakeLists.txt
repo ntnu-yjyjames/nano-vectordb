@@ -59,3 +59,15 @@ target_link_libraries(nvdb_convert_f16 PRIVATE nvdb)
 
 add_executable(nvdb_quantize_i8  apps/nvdb_quantize_i8.cpp)
 target_link_libraries(nvdb_quantize_i8 PRIVATE nvdb)
+
+add_executable(nvdb_hnsw_eval apps/nvdb_hnsw_eval.cpp)
+target_link_libraries(nvdb_hnsw_eval PRIVATE nvdb)
+target_include_directories(nvdb_hnsw_eval PRIVATE third_party/hnswlib)
+
+add_executable(nvdb_hnsw_build apps/nvdb_hnsw_build.cpp)
+target_link_libraries(nvdb_hnsw_build PRIVATE nvdb)
+target_include_directories(nvdb_hnsw_build PRIVATE third_party/hnswlib)
+
+add_executable(nvdb_hnsw_search apps/nvdb_hnsw_search.cpp)
+target_link_libraries(nvdb_hnsw_search PRIVATE nvdb)
+target_include_directories(nvdb_hnsw_search PRIVATE third_party/hnswlib)

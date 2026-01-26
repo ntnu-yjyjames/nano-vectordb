@@ -1,14 +1,15 @@
 # Nano-VectorDB
 ## Highlights (TL;DR)
-Nano-VectorDB is a research-grade C++ vector search engine built to study **memory-bandwidth–bound behavior** in dense retrieval systems.
+## Highlights (TL;DR)
+Nano-VectorDB is a research-grade C++ vector search benchmark built to study **memory-bandwidth–bound behavior** in dense retrieval systems.
 
-Key results:
-- **5.4× speedup** over single-thread flat scan via pinned thread pool
-- **~44.4 GB/s sustained memory bandwidth**, reaching hardware limits
-- **2.7× single-thread speedup** from AVX2+FMA SIMD
-- FP16 bases reduce bytes/query and reach bandwidth saturation at lower thread counts
+Key results (see `performance.md` for full details):
+- **~5× parallel speedup** over single-thread flat scan, saturating effective memory bandwidth (~44–45 GB/s)
+- **2.7× single-thread speedup** from AVX2+FMA (compute-bound → bandwidth-bound transition)
+- **FP16** halves bytes/query and reaches saturation at fewer threads (hybrid Alder Lake effects observed)
+- **INT8(+scale) with AVX2** delivers **~1.8–1.9× throughput vs FP16** across 500K/1M/2.9M (exact top-k within INT8 scoring space)
+- **HNSW baseline**: efSearch and (M, efConstruction) sweeps quantify the **recall–latency–memory** tradeoff (recall@10 vs p99)
 
-See `performance.md` for full experimental analysis.
 
 ## Background
 Nano-VectorDB is a lightweight, embedded **C++ flat-scan vector search engine**
@@ -53,8 +54,8 @@ The design goals are:
    SIMD acceleration, and memory-bandwidth limits.
 4. **Hardware-aware optimization**: explicit control over memory layout, CPU
    affinity/pinning, and instruction-level parallelism.
-5. **Data reduction**: reduce bytes per query (FP16 implemented; INT8/PQ planned)
-   to push throughput beyond bandwidth ceilings.
+5. **Data reduction**: reduce bytes per query to push throughput beyond bandwidth ceilings
+   (FP16 and INT8 implemented; PQ/IVF-PQ planned).
 
 
 ---
@@ -66,7 +67,7 @@ The design goals are:
 - [x] `mmap`-based dataset loader
 - [x] Flat binary formats supported:
 - [x] legacy **raw12** (float32)
- - [x] **vecbin64** header (dtype-aware: FP32/FP16)
+- [x] **vecbin64** header (dtype-aware: FP32/FP16)
 - [x] Correctness checks (`nvdb_dump`, `nvdb_sanity`)
 
 ### ✅ Phase 2 — Baseline Retrieval
@@ -87,11 +88,26 @@ The design goals are:
 - [x] Cross-size FP16 results (500K / 1M / 2.9M)
 - [x] Hybrid (Alder Lake i7-12700) analysis and affinity pitfalls documented
 
-### ⏳ Next (Planned)
-- [ ] Phase 4B: INT8 base + scaling (per-vector/per-block scale)
-- [ ] Phase 5: Query batching / cache tiling / prefetch experiments
-- [ ] Phase 6: ANN baseline (HNSW/IVF) with recall@k vs latency trade-offs
+### ✅ Phase 4B — INT8 Base Quantization (AVX2)
+- [x] INT8(+scale) vecbin64 support (loader + bytes/query accounting)
+- [x] Quantization tool (`nvdb_quantize_i8`)
+- [x] AVX2-optimized INT8 dot kernel
+- [x] Cross-size INT8 results (500K / 1M / 2.9M) and thread scaling (hybrid effects)
 
+### ✅ Phase 5 — Query Batching / Cache Tiling / Prefetch (Exploratory)
+- [x] Query batching implementation and reporting (batch-level percentiles)
+- [x] Tile size sweep (tile_vecs) under batching
+- [x] Software prefetch sweep (prefetch_dist) under batching
+- [ ] (Optional) Integrate batching/prefetch into all backends consistently (st/omp/pool/int8)
+
+### ✅ Phase 6 — ANN Baseline (HNSW)
+- [x] HNSW build + search + evaluation tools (`nvdb_hnsw_build`, `nvdb_hnsw_eval`)
+- [x] efSearch sweep on 500K / 1M / 2.9M (Recall@10 vs Avg/p99)
+- [x] Build parameter sweep (M, efConstruction) at fixed efSearch (Recall–tail–memory)
+
+### ⏳ Next (Planned)
+- [ ] Phase 6B: IVF / IVF-PQ baseline with recall@k vs latency vs memory
+- [ ] Phase 7: End-to-end RAG-oriented experiments (IO + retrieval + rerank)
 ---
 > Note: The following section is provided for **reproducibility and experimental rigor**.
 > For a high-level summary of results, see `performance.md`.
@@ -232,15 +248,33 @@ export OMP_NUM_THREADS=8
 ./build/nvdb_convert_f16 ./out/embeddings_100k.vecbin ./out/embeddings_100k_f16.vecbin
 ./build/nvdb_bench ./out/embeddings_100k_f16.vecbin ./out/query_100.vecbin 10 pool 8 5
 ```
+6) Quantize FP32 base → INT8(+scale) and benchmark (exact flat scan within INT8 scoring space)
+```bash
+./build/nvdb_quantize_i8 ./out/embeddings_100k.vecbin ./out/embeddings_100k_i8.vecbin
+./build/nvdb_bench ./out/embeddings_100k_i8.vecbin ./out/query_100.vecbin 10 omp 0 5
+```
+7)Build and evaluate an HNSW index (ANN baseline)
+```bash
+# Build (example)
+HNSW_M=16 HNSW_EF_CONSTRUCT=200 \
+./build/nvdb_hnsw_build ./out/embeddings_100k.vecbin ./out/hnsw_100k.index
+
+# Evaluate recall@10 and ANN latency (example)
+export HNSW_EF_SEARCH=64
+./build/nvdb_hnsw_eval ./out/embeddings_100k.vecbin ./out/hnsw_100k.index ./out/query_100.vecbin 10
+```
 ## Results & Performance Report
 
 All experimental results, figures, and methodology are documented in:
-➡️ performance.md
+➡️ `performance.md`
 
-* parallel flat-scan benchmarks (500K / 1M / 2.9M)
-* thread scaling and bandwidth ceiling analysis
-* AVX2 compute-bound → bandwidth-bound transition
-* FP16 data-movement optimization + hybrid CPU effects (Alder Lake)
+Includes:
+- parallel flat-scan benchmarks (500K / 1M / 2.9M)
+- thread scaling and bandwidth ceiling analysis (hybrid Alder Lake effects)
+- AVX2 compute-bound → bandwidth-bound transition
+- FP16 and INT8(+scale) data-movement optimization (AVX2 INT8 kernel)
+- query batching / cache tiling / software prefetch experiments (exploratory)
+- HNSW ANN baseline: efSearch and build-parameter sweeps (recall–latency–memory tradeoff)
 
 ### Hardware / Environment (Reference)
 * CPU: Intel Core i7-12700 (8P + 4E / 20 threads), Alder Lake hybrid
