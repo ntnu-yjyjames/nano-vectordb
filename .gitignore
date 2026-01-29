@@ -31,3 +31,5 @@ remote_setup.md
 result.md
 To_do.md
 hnsw_index/
+gt/
+ivf_index

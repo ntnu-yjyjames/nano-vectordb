@@ -71,3 +71,37 @@ target_include_directories(nvdb_hnsw_build PRIVATE third_party/hnswlib)
 add_executable(nvdb_hnsw_search apps/nvdb_hnsw_search.cpp)
 target_link_libraries(nvdb_hnsw_search PRIVATE nvdb)
 target_include_directories(nvdb_hnsw_search PRIVATE third_party/hnswlib)
+
+# ---- FAISS (optional; required for IVF tools) ----
+set(FAISS_ROOT "$ENV{FAISS_ROOT}")
+if(FAISS_ROOT STREQUAL "")
+  set(FAISS_ROOT "$ENV{HOME}/.local")
+endif()
+
+find_library(FAISS_LIB
+  NAMES faiss libfaiss.a libfaiss.so
+  HINTS "${FAISS_ROOT}/lib"
+)
+
+if (FAISS_LIB)
+  message(STATUS "FAISS_ROOT=${FAISS_ROOT}")
+  message(STATUS "FAISS_LIB=${FAISS_LIB}")
+
+  add_executable(nvdb_ivf_build apps/nvdb_ivf_build.cpp)
+  target_link_libraries(nvdb_ivf_build PRIVATE nvdb ${FAISS_LIB} openblas)
+  target_include_directories(nvdb_ivf_build PRIVATE "${FAISS_ROOT}/include")
+
+  add_executable(nvdb_ivf_eval apps/nvdb_ivf_eval.cpp)
+  target_link_libraries(nvdb_ivf_eval PRIVATE nvdb ${FAISS_LIB} openblas)
+  target_include_directories(nvdb_ivf_eval PRIVATE "${FAISS_ROOT}/include")
+else()
+  message(WARNING "FAISS not found. IVF tools will not be built.")
+endif()
+
+add_executable(nvdb_ivfpq_build apps/nvdb_ivfpq_build.cpp)
+target_link_libraries(nvdb_ivfpq_build PRIVATE nvdb ${FAISS_LIB} openblas)
+target_include_directories(nvdb_ivfpq_build PRIVATE "${FAISS_ROOT}/include")
+
+add_executable(nvdb_gt_build apps/nvdb_gt_build.cpp)
+target_link_libraries(nvdb_gt_build PRIVATE nvdb ${FAISS_LIB} openblas)
+target_include_directories(nvdb_gt_build PRIVATE "${FAISS_ROOT}/include")

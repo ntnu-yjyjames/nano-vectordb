@@ -496,3 +496,244 @@ Table 15. Build sweep summary (500K FP32 base; efSearch=64; k=10; Q=1000)
 * **efSearch** is the primary runtime knob for accuracy vs tail latency; efSearch≈64 provides a strong knee point for recall@10≈0.98–0.99 with sub-millisecond ANN p99 across 500K–2.9M.
 * **M** primarily controls memory footprint and recall potential: higher M yields higher recall but increases index size and often increases tail latency.
 * **efConstruction** improves graph quality (recall) with little impact on index size for a fixed M, but can shift the recall–latency tradeoff curve.
+
+## 5B — IVF / IVF-Flat Baseline (FAISS) — nlist/nprobe Surface (500K FP16)
+
+This section evaluates a partition-based ANN baseline using **FAISS IVF-Flat** on the 500K FP16 dataset. Unlike HNSW’s graph traversal, IVF first assigns each query to coarse centroids (lists) and then searches within the probed lists. We sweep two key IVF controls:
+
+* `nlist`: number of inverted lists (coarse clusters)
+* `nprobe`: number of lists probed per query
+
+We report **Recall@10**, **ANN Avg latency**, and **ANN tail latency (p95/p99)** to visualize the accuracy–latency tradeoff surface.
+
+**Setup (unless noted):** `base=500K FP16` (N=500,000; d=384), query=`Q=1000` `FP32`, `k=10`, `ivf_train=200,000`, `warmup=5`.
+
+### 5B.1 IVF Recall Surface (nlist × nprobe)
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_IVF_Heatmap_dark.png"> <img alt="IVF Recall Surface (nlist vs nprobe)" src="performance_images/P8_IVF_Heatmap_light.png"> </picture>
+
+Figure 19. IVF Recall@10 surface for `nlist ∈ {1024, 4096} `and `nprobe ∈ {1,4,8,16,32,64,128,256}` .Recall increases monotonically with `nprobe` for both `nlist` settings, approaching ≥0.99 at sufficiently large `nprobe`.
+
+**Observation.**
+
+Recall is primarily controlled by `nprobe`: increasing `nprobe` yields consistent recall improvements for both nlist values.
+
+For this dataset and training budget (`train=200k`), `nlist=1024 `reaches high recall slightly earlier than `nlist=4096` at small nprobe (e.g., `nprobe=1`: 0.5056 vs 0.4359), suggesting more vectors per list can help early recall when probing is extremely limited. As `nprobe` grows, both configurations converge to near-perfect recall.
+
+### 5B.2 IVF Tail Latency Surface (p99)
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_2_IVF_P99_Heatmap_dark.png"> <img alt="IVF P99 Surface (nlist vs nprobe)" src="performance_images/P8_2_IVF_P99_Heatmap_light.png"> </picture>
+
+Figure 20. IVF p99 latency surface (ms). Tail latency grows rapidly with `nprobe`, reflecting larger candidate expansions and more list scans per query.
+
+**Observation.**
+
+p99 increases strongly with `nprobe` (search intensity).
+
+At very large `nprobe`, `nlist=1024` can exhibit a sharper tail escalation than `nlist=4096` (e.g., at `nprobe=256`, p99: 11.478 ms vs 4.163 ms). This is consistent with larger lists under smaller `nlist` causing heavy worst-case scans when probing becomes wide.
+
+### 5B.3 Recall–Tail Tradeoff (Offset Labels)
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_3_IVF_Tradeoff_dark.png"> <img alt="IVF Recall–P99 Tradeoff" src="performance_images/P8_3_IVF_Tradeoff_light.png"> </picture>
+
+Figure 21. Recall@10 vs ANN p99 latency tradeoff for IVF-Flat. Each curve is a fixed `nlist`, and labels indicate `nprobe` values.
+
+**Interpretation.**
+
+The “knee” region appears around `nprobe` ≈ 16–32, where recall becomes usable/high while p99 has not yet exploded.
+
+For very high recall targets (≥0.99), `nprobe` must increase to 128–256, but p99 cost rises substantially—especially for `nlist=1024`.
+
+| nlist | nprobe | Recall@10 | ANN Avg (ms) | ANN p95 (ms) | ANN p99 (ms) |      QPS | Index size (MB) | Train time (s) | Add time (s) |
+| ----: | -----: | --------: | -----------: | -----------: | -----------: | -------: | --------------: | -------------: | -----------: |
+|  1024 |      1 |    0.5056 |        0.214 |        0.615 |        0.812 | 4667.808 |             738 |          3.751 |        1.466 |
+|  1024 |      4 |    0.8072 |        0.425 |        1.301 |        1.588 | 2355.141 |             738 |          3.751 |        1.466 |
+|  1024 |      8 |    0.9035 |        0.512 |        1.629 |        2.201 | 1951.945 |             738 |          3.751 |        1.466 |
+|  1024 |     16 |    0.9558 |        0.842 |        2.025 |        3.249 | 1187.265 |             738 |          3.751 |        1.466 |
+|  1024 |     32 |    0.9814 |        1.333 |        1.670 |        3.227 |  750.376 |             738 |          3.751 |        1.466 |
+|  1024 |     64 |    0.9944 |        2.457 |        2.954 |        4.861 |  406.977 |             738 |          3.751 |        1.466 |
+|  1024 |    128 |    0.9981 |        4.510 |        5.163 |        5.823 |  221.734 |             738 |          3.751 |        1.466 |
+|  1024 |    256 |    0.9989 |        8.700 |        9.589 |       11.478 |  114.936 |             738 |          3.751 |        1.466 |
+|  4096 |      1 |    0.4359 |        0.411 |        1.476 |        1.547 | 2430.455 |             743 |         13.869 |        4.819 |
+|  4096 |      4 |    0.7202 |        0.527 |        1.663 |        1.772 | 1896.783 |             743 |         13.869 |        4.819 |
+|  4096 |      8 |    0.8238 |        0.499 |        1.744 |        1.943 | 2005.146 |             743 |         13.869 |        4.819 |
+|  4096 |     16 |    0.9025 |        0.563 |        1.692 |        2.328 | 1776.295 |             743 |         13.869 |        4.819 |
+|  4096 |     32 |    0.9493 |        0.683 |        0.805 |        2.767 | 1463.229 |             743 |         13.869 |        4.819 |
+|  4096 |     64 |    0.9760 |        1.010 |        1.236 |        3.375 |  990.484 |             743 |         13.869 |        4.819 |
+|  4096 |    128 |    0.9917 |        1.614 |        1.967 |        3.590 |  619.580 |             743 |         13.869 |        4.819 |
+|  4096 |    256 |    0.9978 |        2.755 |        3.359 |        4.163 |  362.962 |             743 |         13.869 |        4.819 |
+
+Table 16. IVF-Flat sweep results (500K FP16, train=200k, Q=1000, k=10)
+
+### 5B.4 Build cost and index footprint
+
+Although `nlist` strongly affects training time, the resulting index footprint changes only slightly in this IVF-Flat setting (738 MB vs 743 MB), since the dominant storage is still the raw vector payload. In contrast, the build time increases substantially with higher `nlist` (3.75 s → 13.87 s for training), reflecting the heavier k-means clustering workload.
+
+| nlist | Train time (s) | Add time (s) | Index size (MB) |
+| ----: | -------------: | -----------: | --------------: |
+|  1024 |          3.751 |        1.466 |             738 |
+|  4096 |         13.869 |        4.819 |             743 |
+
+Table 17. Build summary (fixed train=200k, N=500K)
+
+### 5B.5 Takeaways
+
+* **`nprobe` is the primary accuracy knob**: recall increases monotonically with `nprobe` for both `nlist=1024` and `nlist=4096`.
+* **Tail latency is the primary cost**: p99 grows rapidly with `nprobe`, and can spike sharply for smaller `nlist` at extreme probing.
+* **Practical operating region**: `nprobe ≈ 16–32 ` offers a stable “knee” region with strong recall improvements while keeping p99 within a few milliseconds.
+* **Build tradeoff**: increasing nlist significantly increases training time, while index size changes only marginally for IVF-Flat.
+
+### Methodology note: ` EVAL_MODE=ann_only` (variance diagnostics)
+
+In addition to recall-mode evaluation, we optionally run `EVAL_MODE=ann_only` to measure ANN search latency in isolation, excluding the ground-truth computation (exact flat-scan) used for Recall@k. This mode is used only for **variance diagnostics** (e.g., checking whether non-monotonic p95/p99 behavior is caused by FAISS search itself vs. the evaluation pipeline), and should not be interpreted as an accuracy–latency operating point because Recall@k is intentionally not computed in this mode.
+
+| nlist | nprobe | Avg_ms (min–max) | p95_ms (min–max) | p99_ms (min–max) |
+| ----: | -----: | ---------------: | ---------------: | ---------------: |
+|  1024 |     16 |      0.625–0.659 |      0.813–0.892 |      0.903–1.168 |
+|  1024 |     32 |      1.177–1.217 |      1.443–1.519 |      1.563–2.565 |
+|  1024 |     64 |      2.261–2.264 |      2.662–2.682 |      2.824–2.919 |
+|  4096 |     16 |      0.301–0.309 |      0.375–0.394 |      0.415–0.446 |
+|  4096 |     32 |      0.474–0.483 |      0.604–0.618 |      0.648–0.741 |
+|  4096 |     64 |      0.785–0.797 |      1.005–1.023 |      1.083–1.123 |
+
+Table 18. ANN-only latency variance check (EVAL_MODE=ann_only, Q=1000, k=10)
+
+### 5B.6 Transition
+
+IVF-Flat exposes the fundamental `nprobe`-driven accuracy–tail tradeoff. Next, we move to **compressed IVF** (IVF-PQ / IVF-OPQ-PQ) and evaluate how lightweight refinement can recover accuracy under a much smaller **index footprint**.
+
+
+
+###  5C — IVF-PQ → OPQ-PQ → Refine: Stage-wise Quality Ladder (500K, `nlist=4096`, `nprobe=64`)
+
+To summarize the staged improvements in quantization-based ANN, we compare three configurations under a fixed search budget (`nlist=4096`, `nprobe=64`, `k=10` ,`Q=1000`, base=FP16). We start from **IVF-PQ**, then add an **OPQ rotation** (IndexPreTransform) to reduce PQ distortion, and finally apply **exact L2 refinement** over the top-R candidates (**Refine R=50**) to recover near-exact recall while keeping the ANN candidate generation fast.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/Stages_Evolution_dark.png"> <img alt="Optimization stages: Recall vs Total P99" src="performance_images/Stages_Evolution_light.png"> </picture>
+
+Figure 22. Stage-wise tradeoff between accuracy and tail latency. Bars show Recall@10; the line shows TOTAL p99 latency (ANN search + optional refine). Configuration: 500K vectors, FP16 base, `nlist=4096`, `nprobe=64,` `k=10`, `Q=1000`.
+
+| Stage                      | Index size (MB) | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) |
+| -------------------------- | --------------: | --------: | -----------: | -----------: | -------------: | -------------: |
+| IVF-PQ (m=64, b=8)         |              41 |    0.6943 |        0.709 |        1.063 |          0.709 |          1.063 |
+| IVF-OPQ-PQ (m=64, b=8)     |              42 |    0.7657 |        0.794 |        1.309 |          0.794 |          1.309 |
+| IVF-OPQ-PQ + Refine (R=50) |              42 |    0.9743 |        0.595 |        0.785 |          0.643 |          0.857 |
+
+Table 19. Stage summary (fixed nlist=4096, nprobe=64)
+
+#### Interpretation
+
+**(1) OPQ improves accuracy but can increase tail latency.**
+Applying OPQ before PQ increases Recall@10 from **0.6943 → 0.7657 (+0.0714 absolute)** at essentially the same index size (**~41–42 MB**). However, the measured p99 increases (**1.063 → 1.309 ms**), consistent with added transform overhead and/or less favorable cache behavior in the pretransform execution path.
+
+**(2) Refinement recovers near-exact quality with modest total overhead.**
+With **Refine R=50**, Recall@10 jumps to **0.9743** while keeping TOTAL p99 at **0.857 ms**, which **is lower than the OPQ-only p99 (1.309 ms)** and only modestly higher than the ANN-only latency at the same stage. This indicates that (i) the ANN candidate set is sufficiently strong at `nprobe=64`, and (ii) exact L2 refinement over a small candidate set is a cost-effective way to convert “approximate PQ ranking” into a high-accuracy top-k.
+
+**(3) Practical takeaway (for this workload).**
+For a fixed latency budget, the staged strategy **“OPQ-PQ + small refine”** provides a strong operating point: it achieves high **Recall@10 (~0.97)** while maintaining **sub-millisecond tail latency**, and retains a compact memory footprint (~42 MB) compared with storing full-precision vectors.
+
+### 5C.1 Refinement Grid: `nprobe` × `REFINE_K` Frontier (OPQ-PQ, `nlist=4096`, 500K)
+
+We next characterize how **candidate quality** (controlled by `nprobe`) and **exact refinement depth** (`REFINE_K`) jointly shape the accuracy–tail tradeoff under a fixed compressed index (**IVF-OPQ-PQ**, `nlist=4096`, `m=64`, `b=8`). We sweep `nprobe ∈ {8,16,32,64,128}` and `REFINE_K ∈ {0,10,20,50,100}`. Here, **ANN** refers to the FAISS candidate generation stage, while **TOTAL** includes both candidate generation and the exact L2 refinement over top-`REFINE_K` candidates.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_Recall_Surface_Heatmap_dark.png"> <img alt="Recall surface: nprobe x refine_k" src="performance_images/P6C2_Recall_Surface_Heatmap_light.png"> </picture>
+
+Figure 23. **Recall surface** over `nprobe` × `REFINE_K` (OPQ-PQ, `nlist=4096`, `Q=1000`, `k=10`). Refinement produces large recall gains once REFINE_K ≥ 20, and benefits saturate near REFINE_K≈50 for mid/high nprobe.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_P99_Surface_Heatmap_dark.png"> <img alt="Total p99 surface: nprobe x refine_k" src="performance_images/P6C2_P99_Surface_Heatmap_light.png"> </picture>
+
+Figure 24. **TOTAL p99 surface** (ANN + refinement) over `nprobe` × `REFINE_K`. Tail latency is dominated by search width at large `nprobe`, with additional tail inflation when refinement becomes heavy (large `REFINE_K`) or when system-level variance appears under higher load.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_Pareto_Frontier_dark.png"> <img alt="Pareto frontier: recall vs total p99" src="performance_images/P6C2_Pareto_Frontier_light.png"> </picture>
+
+Figure 25. **Pareto frontier** in (Recall@10, TOTAL p99). Marker shape encodes `nprobe`; color encodes `REFINE_K`. The dashed curve shows the Pareto-efficient subset (higher recall with no worse tail).
+
+#### Key observations
+
+**1. Refinement has a threshold effect.**
+For all `nprobe`, `REFINE_K=0/10` yields identical recall (because the final ranking is still constrained by the same candidate list). Once `REFINE_K` reaches **20**, recall improves sharply (e.g., `nprobe=64`: **0.7656 → 0.9319**). Further increasing to 50 yields another substantial gain (`nprobe=64`: **0.9319 → 0.9743**), while 100 provides only marginal additional recall (e.g., `nprobe=64`: **0.9743 → 0.9758**).
+
+**2.The best operating region emerges from the 2D surface, not a 1D sweep.**
+From Figure 23/25, strong points cluster around:
+* `nprobe=64`, `REFINE_K=50`: recall **0.9743** with TOTAL p99 **0.735 ms**
+* `nprobe=32`, `REFINE_K=50`: recall **0.9481** with TOTAL p99 **0.521 ms**
+* `nprobe=128`, `REFINE_K=50`: recall **0.9896** but TOTAL p99 rises to **2.23 ms** (tail dominated by larger search width)
+
+**3.Interpreting “refine overhead” correctly (Δ definition).**
+When comparing ANN vs TOTAL tails, the refinement cost is **Δ = TOTAL p99 − ANN p99** (same for averages). In most mid-range settings, Δ is small (tens of microseconds to ~0.1 ms), showing refinement is efficient when candidate sets are already high-quality. Occasional small non-monotonicity (e.g., TOTAL p99 at `REFINE_K=100` slightly lower/higher than nearby points) is consistent with run-to-run variance (scheduler/cache state), not a stable algorithmic reversal.
+
+**4.Large `nprobe` can amplify tail variance.**
+Figure 24 shows that tails can spike for some high-load combinations (e.g., `nprobe=128`, `REFINE_K=10`), even when recall does not improve. This supports treating “very wide probing + shallow refinement” as an inefficient region: it increases work and variance without meaningful quality gains.
+
+| nprobe | REFINE_K | Recall@10 | ANN p99 (ms) | TOTAL p99 (ms) |
+| -----: | -------: | --------: | -----------: | -------------: |
+|      8 |        0 |    0.6970 |        0.344 |          0.345 |
+|      8 |       20 |    0.8051 |        0.349 |          0.394 |
+|      8 |       50 |    0.8238 |        0.292 |          0.359 |
+|     16 |        0 |    0.7354 |        0.346 |          0.346 |
+|     16 |       20 |    0.8741 |        0.353 |          0.382 |
+|     16 |       50 |    0.9022 |        0.354 |          0.412 |
+|     32 |        0 |    0.7561 |        0.462 |          0.462 |
+|     32 |       20 |    0.9114 |        0.467 |          0.499 |
+|     32 |       50 |    0.9481 |        0.454 |          0.521 |
+|     64 |        0 |    0.7656 |        1.040 |          1.040 |
+|     64 |       20 |    0.9319 |        0.726 |          0.762 |
+|     64 |       50 |    0.9743 |        0.674 |          0.735 |
+|    128 |        0 |    0.7717 |        1.130 |          1.130 |
+|    128 |       20 |    0.9434 |        1.730 |          1.760 |
+|    128 |       50 |    0.9896 |        2.180 |          2.230 |
+
+Table 20. `nprobe` × `REFINE_K` grid (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`, `k=10`). TOTAL includes both candidate generation and refinement.
+
+Full grid (25 points) is provided in results_refine_sweep/refine_grid_opq_m64_np_rk.csv.
+
+
+
+
+### 5C.2 Refinement yield vs. budget (fixed `nprobe=64`)
+
+We quantify the marginal yield of exact L2 refinement by sweeping `REFINE_K ∈ {10,20,50,100}` under a fixed OPQ-PQ candidate generator (`nlist=4096`, `nprobe=64`, `k=10`, `Q=1000`, FP16 base, metric=L2 with cached GT). We report Recall@10 and tail latency for both **ANN** (candidate generation only) and **TOTAL** (ANN + refine). We define the incremental tail cost of refinement as **Δp99 = TOTAL p99 − ANN p99**.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C3_Yield_Curve_Recall_dark.png"> <img alt="Yield curve: Recall@10 gains via REFINE_K" src="performance_images/P6C3_Yield_Curve_Recall_light.png"> </picture>
+
+Figure 26. Yield curve (Recall@10 vs `REFINE_K`) at `nprobe=64` under OPQ-PQ (m=64, b=8). Recall exhibits strong diminishing returns: most gains arrive by `REFINE_K≈20–50`, with minimal improvement beyond 50.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C3_Cost_Curve_P99_dark.png"> <img alt="Cost curve: TOTAL p99 vs REFINE_K, with ANN baseline" src="performance_images/P6C3_Cost_Curve_P99_light.png"> </picture>
+
+Figure 27. Tail-latency cost curve (p99 vs `REFINE_K`). **ANN p99** denotes candidate generation only; TOTAL p99 includes refinement. In our runs, minor non-monotonicity in p99 across neighboring points can occur within normal run-to-run variance (scheduler/cache state).
+
+| REFINE_K | k_search | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) | Δp99 (ms) |
+| -------: | -------: | --------: | -----------: | -----------: | -------------: | -------------: | --------: |
+|       10 |       10 |    0.7656 |        0.576 |        0.828 |          0.592 |          0.857 |     0.029 |
+|       20 |       20 |    0.9319 |        0.575 |        0.829 |          0.600 |          0.869 |     0.040 |
+|       50 |       50 |    0.9743 |        0.568 |        0.785 |          0.615 |          0.834 |     0.049 |
+|      100 |      100 |    0.9758 |        0.559 |        0.668 |          0.641 |          0.781 |     0.113 |
+
+
+Table 21. Refinement sweep summary at `nprobe=64` (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`,` k=10`). Δp99 is defined as **TOTAL p99 − ANN p99**.
+
+**Interpretation.** Refinement is highly cost-effective up to `REFINE_K≈50`: recall rises from **0.7656 → 0.9319** at `REFINE_K=20`, then to **0.9743** at `REFINE_K=50`, while the incremental tail cost remains small (Δp99 ≤ **0.049 ms**). Increasing to `REFINE_K=100` yields negligible accuracy gain (**0.9758**) but higher average cost (TOTAL Avg **0.641 ms**) and a larger Δp99 (**0.113 ms**), suggesting `REFINE_K≈50` as a practical sweet spot for this workload.
+
+### 5C.3 Candidate quality vs. refinement stability (fixed `REFINE_K=50`)
+
+To test whether refinement behavior is robust across different candidate-set qualities, we fix `REFINE_K=50` and sweep `nprobe ∈ {8, 16, 32, 64, 128}`. This isolates how much recall is limited by candidate generation vs. refinement capacity.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C_Refine_Accuracy_Tail_Frontier_dark.png"> <img alt="Accuracy–tail frontier under refinement" src="performance_images/P6C_Refine_Accuracy_Tail_Frontier_light.png"> </picture>
+
+Figure 28. Accuracy–tail frontier under fixed refinement (`REFINE_K=50`). Each point corresponds to a different `nprobe` (OPQ-PQ, `nlist=4096`, `k=10`, `Q=1000`, FP16 base).
+
+| nprobe | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) |
+| -----: | --------: | -----------: | -----------: | -------------: | -------------: |
+|      8 |    0.8238 |        0.256 |        0.351 |          0.303 |          0.409 |
+|     16 |    0.9022 |        0.302 |        0.400 |          0.349 |          0.448 |
+|     32 |    0.9481 |        0.389 |        0.537 |          0.436 |          0.596 |
+|     64 |    0.9743 |        0.577 |        0.795 |          0.624 |          0.853 |
+|    128 |    0.9896 |        0.926 |        1.250 |          0.973 |          1.310 |
+
+
+Table 22. `nprobe` sweep with fixed refinement (`REFINE_K=50`).
+
+**Interpretation.** With `REFINE_K` held constant, recall improves predictably as `nprobe` increases (better candidates), and begins to saturate around `nprobe≈64` for this configuration. Latency increases with `nprobe` as expected due to heavier list probing and a larger candidate pool to score and re-rank.
+
+### 5C.4 Takeaways
+
+* **Compression + refinement is a strong accuracy–latency–memory recipe.** Under a compact OPQ-PQ index (~42 MB), a lightweight exact L2 re-rank can recover near-exact quality without reverting to full-precision storage.
+* **Refinement shows clear diminishing returns.** For the fixed `nlist=4096`, `nprobe=64` operating point, most accuracy gains arrive by `REFINE_K≈20–50`, while larger REFINE_K yields minimal recall improvement but higher total cost.
+* **Candidate quality remains the dominant limiter.** Refinement cannot recover neighbors that were never retrieved; increasing nprobe improves recall predictably, and the best operating points emerge from the joint (`nprobe`, `REFINE_K`) surface rather than any single knob.
+* **Practical sweet spot for this workload.** `nprobe≈32–64` with `REFINE_K≈50` provides a stable high-quality region, delivering strong Recall@10 while keeping TOTAL tail latency within a tight sub-millisecond regime on this platform.
