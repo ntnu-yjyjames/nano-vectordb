@@ -1,62 +1,68 @@
 # Nano-VectorDB
-## Highlights (TL;DR)
-## Highlights (TL;DR)
-Nano-VectorDB is a research-grade C++ vector search benchmark built to study **memory-bandwidth–bound behavior** in dense retrieval systems.
 
-Key results (see `performance.md` for full details):
-- **~5× parallel speedup** over single-thread flat scan, saturating effective memory bandwidth (~44–45 GB/s)
-- **2.7× single-thread speedup** from AVX2+FMA (compute-bound → bandwidth-bound transition)
-- **FP16** halves bytes/query and reaches saturation at fewer threads (hybrid Alder Lake effects observed)
-- **INT8(+scale) with AVX2** delivers **~1.8–1.9× throughput vs FP16** across 500K/1M/2.9M (exact top-k within INT8 scoring space)
-- **HNSW baseline**: efSearch and (M, efConstruction) sweeps quantify the **recall–latency–memory** tradeoff (recall@10 vs p99)
+Nano-VectorDB is a research-grade C++ vector search benchmark built to study **system bottlenecks** in dense retrieval—especially the transition from **compute-bound** to **memory-bandwidth–bound** behavior, and the tradeoffs introduced by **compression** and **ANN indexing**.
 
-
-## Background
-Nano-VectorDB is a lightweight, embedded **C++ flat-scan vector search engine**
-built to study **system-level performance bottlenecks** in dense retrieval
-workloads such as RAG pipelines.
-
-Rather than optimizing model accuracy, this project focuses on **hardware-visible
-constraints**, including:
-
-- memory bandwidth and cache behavior  
-- data movement (disk → RAM → cache)  
-- CPU parallelism and instruction-level utilization (SIMD)  
-- performance ceilings across dataset sizes  
-
-**Key idea:** For large-scale flat scan, performance rapidly becomes
-**data-movement bound**.
-
-Once memory bandwidth is saturated, increasing thread count yields diminishing
-returns. Meaningful speedups come from **reducing bytes per query**
-(e.g., FP16/INT8) or avoiding full scans—not from additional parallelism.
-
-
+- Full technical report: **`performance.md`**
+- Short digest for readers/HR: **`performance_summary.md`**
+- Reproducibility guide (build + run commands): **`REPRO.md`** (recommended; keep README short)
 
 ---
 
-## Project Overview (Original Goal)
+## Highlights (TL;DR)
 
-Nano-VectorDB was designed as a **clean experimental platform** for understanding
-the fundamental performance limits of dense vector retrieval at scale.
+### Flat-scan (Exact) bottleneck characterization
+- **~5× parallel speedup** vs single-thread flat scan, reaching **~44–45 GB/s** effective bandwidth (CPU ceiling)
+- **~2.7× single-thread speedup** from **AVX2+FMA**, then performance transitions to **bandwidth-bound**
+- **FP16** halves bytes/query and reaches bandwidth saturation with fewer threads (hybrid CPU effects observed)
+- **INT8(+scale) AVX2 kernel** delivers **~1.8–1.9× throughput vs FP16** on large datasets (exact top-k within INT8 scoring space)
 
-Rather than building a full-featured vector database, the system intentionally
-focuses on a minimal set of retrieval primitives to make system bottlenecks
-**explicit, measurable, and reproducible**.
+### ANN baselines and compression ladder
+- **HNSW baseline**: efSearch sweep and build-parameter sweep (M, efConstruction) quantify **recall–latency–memory** tradeoffs
+- **IVF-Flat vs IVF-(OPQ)PQ+Refine**:
+  - IVF-Flat retains large footprint (raw vectors dominate)
+  - IVF-(OPQ)PQ compresses to **tens of MB** and **Refine** recovers high Recall@10 with small tail-cost
 
-The design goals are:
+---
+
+## Key Figures (Representative)
+
+### 1) Bandwidth ceiling (flat scan)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="performance_images/P4B_2_Bandwidth_Refined_dark.png">
+  <img alt="Bandwidth scaling and saturation" src="performance_images/P4B_2_Bandwidth_Refined_light.png">
+</picture>
+
+### 2) Query batching throughput (INT8 vs FP16)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="performance_images/P7_Batching_QPS_dark.png">
+  <img alt="Batching throughput vs batch size" src="performance_images/P7_Batching_QPS_light.png">
+</picture>
+
+### 3) HNSW recall–tail tradeoff
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_1_Tradeoff_Updated_dark.png">
+  <img alt="HNSW recall vs p99 tradeoff" src="performance_images/P6_1_Tradeoff_Updated_light.png">
+</picture>
+
+### 4) Compressed IVF stage ladder (PQ → OPQ-PQ → Refine)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="performance_images/Stages_Evolution_dark.png">
+  <img alt="IVF OPQ-PQ refine ladder" src="performance_images/Stages_Evolution_light.png">
+</picture>
+
+> Note: `performance.md` contains the full sweep surfaces and grids (nlist/nprobe, refine grids, etc.). README intentionally shows only representative figures.
+
+---
+
+## Project Goals
+
+Nano-VectorDB is intentionally minimal to make bottlenecks **explicit, measurable, and reproducible**:
 
 1. **Infrastructure**: zero-copy loading of large embedding matrices via `mmap`
-   to minimize I/O and allocation overhead.
-2. **Baseline retrieval**: correctness-first flat-scan Top-k search as a
-   ground-truth reference.
-3. **Bottleneck isolation**: controlled experiments to separately study threading,
-   SIMD acceleration, and memory-bandwidth limits.
-4. **Hardware-aware optimization**: explicit control over memory layout, CPU
-   affinity/pinning, and instruction-level parallelism.
-5. **Data reduction**: reduce bytes per query to push throughput beyond bandwidth ceilings
-   (FP16 and INT8 implemented; PQ/IVF-PQ planned).
-
+2. **Exact baseline**: correctness-first flat-scan Top-k as ground truth reference
+3. **Bottleneck isolation**: controlled experiments for threading, SIMD, bandwidth ceilings
+4. **Data movement reduction**: FP16 / INT8(+scale), batching/tiling/prefetch
+5. **ANN & compression**: HNSW / IVF / IVF-(OPQ)PQ + refine (candidate-gen + small exact rerank)
 
 ---
 
@@ -65,220 +71,55 @@ The design goals are:
 ### ✅ Phase 1 — Infrastructure & Zero-Copy I/O
 - [x] CMake/Ninja project structure
 - [x] `mmap`-based dataset loader
-- [x] Flat binary formats supported:
-- [x] legacy **raw12** (float32)
-- [x] **vecbin64** header (dtype-aware: FP32/FP16)
-- [x] Correctness checks (`nvdb_dump`, `nvdb_sanity`)
+- [x] vecbin format (dtype-aware: FP32/FP16/INT8+scale)
+- [x] correctness checks (`nvdb_dump`, `nvdb_sanity`)
 
 ### ✅ Phase 2 — Baseline Retrieval
-- [x] Flat-scan Top-k baseline (ST)
-- [x] Benchmark harness with Avg/QPS/p95/p99
-- [x] Derived metrics: `bytes_per_query`, `effective_bandwidth_GBps`
+- [x] exact flat-scan Top-k baseline (ST/OMP/POOL)
+- [x] benchmark harness (avg/QPS/p95/p99) + derived metrics (bytes/query, effective bandwidth)
 
 ### ✅ Phase 3 — Parallelism & SIMD
-- [x] OpenMP implementation (OMP)
-- [x] `std::async` implementation (ASYNC)
-- [x] Pinned thread-pool implementation (POOL) with hybrid-aware affinity handling
-- [x] Thread scaling experiments (sweet spot discovery)
-- [x] AVX2+FMA dot kernel (compute-bound → bandwidth-bound transition)
+- [x] OpenMP, std::async, pinned thread-pool
+- [x] AVX2+FMA dot kernel; compute-bound → bandwidth-bound transition
 
 ### ✅ Phase 4 — Reduce Data Movement (FP16)
-- [x] FP16 base conversion tool (`nvdb_convert_f16`)
-- [x] FP16 flat scan support (ST/OMP/ASYNC/POOL)
-- [x] Cross-size FP16 results (500K / 1M / 2.9M)
-- [x] Hybrid (Alder Lake i7-12700) analysis and affinity pitfalls documented
+- [x] FP16 conversion tool + benchmarks across 500K / 1M / 2.9M
+- [x] hybrid Alder Lake affinity pitfalls documented
 
 ### ✅ Phase 4B — INT8 Base Quantization (AVX2)
-- [x] INT8(+scale) vecbin64 support (loader + bytes/query accounting)
-- [x] Quantization tool (`nvdb_quantize_i8`)
-- [x] AVX2-optimized INT8 dot kernel
-- [x] Cross-size INT8 results (500K / 1M / 2.9M) and thread scaling (hybrid effects)
+- [x] INT8(+scale) format + AVX2 kernel
+- [x] throughput advantage quantified (vs FP16), cross-size
 
 ### ✅ Phase 5 — Query Batching / Cache Tiling / Prefetch (Exploratory)
-- [x] Query batching implementation and reporting (batch-level percentiles)
-- [x] Tile size sweep (tile_vecs) under batching
-- [x] Software prefetch sweep (prefetch_dist) under batching
-- [ ] (Optional) Integrate batching/prefetch into all backends consistently (st/omp/pool/int8)
+- [x] batching metrics (batch-level percentiles)
+- [x] tile sweep + prefetch sweep
 
 ### ✅ Phase 6 — ANN Baseline (HNSW)
-- [x] HNSW build + search + evaluation tools (`nvdb_hnsw_build`, `nvdb_hnsw_eval`)
-- [x] efSearch sweep on 500K / 1M / 2.9M (Recall@10 vs Avg/p99)
-- [x] Build parameter sweep (M, efConstruction) at fixed efSearch (Recall–tail–memory)
+- [x] build + eval tools
+- [x] efSearch sweep across sizes
+- [x] build-parameter sweep (M, efConstruction)
+
+### ✅ Phase 6B/6C — IVF / IVF-(OPQ)PQ + Refinement
+- [x] IVF-Flat nlist/nprobe surface + build footprint
+- [x] IVF-PQ / OPQ-PQ baseline
+- [x] refine sweeps (yield/cost + nprobe×refine grid + Pareto view)
 
 ### ⏳ Next (Planned)
-- [ ] Phase 6B: IVF / IVF-PQ baseline with recall@k vs latency vs memory
 - [ ] Phase 7: End-to-end RAG-oriented experiments (IO + retrieval + rerank)
----
-> Note: The following section is provided for **reproducibility and experimental rigor**.
-> For a high-level summary of results, see `performance.md`.
-
-## Dataset & Embeddings
-
-### Dataset source (official)
-All experiments use a dataset derived from the **arXiv metadata snapshot released by Cornell University** (`arxiv-metadata-oai-snapshot.json`), distributed on Kaggle:
-
-- Kaggle dataset (Cornell University — arXiv): https://www.kaggle.com/datasets/Cornell-University/arxiv
-
-This repository does **not** include the raw dataset or generated embeddings due to size constraints.
+- [ ] Phase 8: GPU path (CUDA kernels / GPU ANN baselines) — optional research track
 
 ---
 
-### Data preparation pipeline (chunking + embedding → `.vecbin`)
-Nano-VectorDB does **not** perform chunking or embedding natively.  
-All preprocessing, **chunking**, and embedding are performed in a standalone Python pipeline and exported to `.vecbin` for the C++ engine.
-
-This repo includes:
-- `scripts/build_vecbin_chunked.py` — builds **chunk-level** embeddings from the CSV and exports `.vecbin` + row metadata.
-
-**Input (repo-local):**
-- `./arxiv_data/arxiv_cornell_title_abstract.csv`  
-  Required columns: `title`, `abstract`  
-  Recommended: `id`, `categories`  
-  Optional full-text columns: `full_text`, `body_text`, `paper_text`, or `text` (if present, sections are detected and chunked)
-
-**Embedding model:**
-- `sentence-transformers/all-MiniLM-L6-v2` → **384-D**, L2-normalized
+## Quick Links
+- `performance_summary.md` — short version (recommended for readers)
+- `performance.md` — full report (all sweeps, figures, tables)
+- `REPRO.md` — how to build + reproduce experiments (kept out of README to reduce length)
 
 ---
 
-### Important note on “500K” (documents vs vectors)
-The Python pipeline parameter `--max-docs 500000` limits the number of **documents (CSV rows)** processed, **not** the number of output vectors.  
-Because each document may produce **multiple chunks**, the resulting embedding matrix typically contains **more than 500K vectors**.
-
-In `performance.md`, reported datasets such as “500K / 1M vectors” refer to the **number of vectors (rows in the embedding matrix)**.  
-To make experiments comparable, we generate a larger (ideally full) embedding matrix and then slice the first **N vectors** using the C++ tool:
-
-- `./build/nvdb_slice <input.vecbin> <output.vecbin> <N>`
-
-This ensures the benchmark input size is **exactly N vectors**, regardless of how many chunks were produced per document.
-
----
-### Python environment (`.venv`)
-We use a project-local virtual environment for the data pipeline:
-
-```bash
-cd Nano-vectorDB
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-pip install -r requirements.txt
-```
-Deactivate with:
-```bash
-deactivate
-```
-### Recommended reproduction workflow (exact vector counts)
-If you want to reproduce the benchmark results with consistent vector counts:
-
-1) **Build a full embedding set** (or a large enough set):
-```bash
-python scripts/build_vecbin_chunked.py \
-  --csv-path ./arxiv_data/arxiv_cornell_title_abstract.csv \
-  --out ./vecbin_full/embeddings_full.vecbin \
-  --format raw12 \
-  --prefer-fulltext \
-  --export-metadata
-```
-2) Slice to the first N vectors (e.g., 500K / 1M):
-```bash
-./build/nvdb_slice ./vecbin_full/embeddings_full.vecbin ./vecbin_full/embeddings_500k.vecbin 500000
-./build/nvdb_slice ./vecbin_full/embeddings_full.vecbin ./vecbin_full/embeddings_1m.vecbin   1000000
-```
-
-3) (Optional) Convert FP32 → FP16 base:
-```bash
-./build/nvdb_convert_f16 ./vecbin_full/embeddings_500k.vecbin ./vecbin_full/embeddings_500k_f16.vecbin
-```
-#### Faster workflow (approximate experiments)
-If you do not require strict comparability by exact vector count, you may run experiments directly on the output of:
-```bash
-python scripts/build_vecbin_chunked.py --max-docs <N_docs> ...
-```
-
-Be aware that the resulting .vecbin will contain N_vectors ≥ N_docs due to chunking, so results may not align exactly with the “N vectors” benchmarks.
-
-#### Row-level metadata (optional)
-
-When `--export-metadata` is enabled, the pipeline writes:
-* `<out>.rowmeta.jsonl`
-
-Each line maps a vector row back to its source:
-```json
-{"row":0,"doc_idx":0,"id":"...","title":"...","section":"abstract","chunk_index":0}
-```
-
-This is optional for pure performance benchmarking, but useful for end-to-end inspection (mapping row id → paper/chunk).
-
-
----
-
-## Build
-
-```bash
-# Arch Linux
-sudo pacman -S --needed base-devel cmake ninja
-
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
-## Quickstart
-1) Inspect a vecbin file
-```bash
-./build/nvdb_dump ./vecbin_full/embeddings.vecbin 3 8
-./build/nvdb_sanity ./vecbin_full/embeddings.vecbin 10
-```
-2) Make a smaller base (e.g., 100k) and queries
-```bash
-./build/nvdb_slice  ./vecbin_full/embeddings.vecbin ./out/embeddings_100k.vecbin 100000
-./build/nvdb_make_query ./out/embeddings_100k.vecbin ./out/query_100.vecbin 100 42 random
-```
-3) Run baseline benchmark
-```bash
-./build/nvdb_bench ./out/embeddings_100k.vecbin ./out/query_100.vecbin 10 st 1 5
-```
-4) Run OMP benchmark (thread count via env)
-```bash
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export OMP_NUM_THREADS=8
-./build/nvdb_bench ./out/embeddings_100k.vecbin ./out/query_100.vecbin 10 omp 0 5
-```
-5) Convert FP32 base → FP16 base and benchmark
-```bash
-./build/nvdb_convert_f16 ./out/embeddings_100k.vecbin ./out/embeddings_100k_f16.vecbin
-./build/nvdb_bench ./out/embeddings_100k_f16.vecbin ./out/query_100.vecbin 10 pool 8 5
-```
-6) Quantize FP32 base → INT8(+scale) and benchmark (exact flat scan within INT8 scoring space)
-```bash
-./build/nvdb_quantize_i8 ./out/embeddings_100k.vecbin ./out/embeddings_100k_i8.vecbin
-./build/nvdb_bench ./out/embeddings_100k_i8.vecbin ./out/query_100.vecbin 10 omp 0 5
-```
-7)Build and evaluate an HNSW index (ANN baseline)
-```bash
-# Build (example)
-HNSW_M=16 HNSW_EF_CONSTRUCT=200 \
-./build/nvdb_hnsw_build ./out/embeddings_100k.vecbin ./out/hnsw_100k.index
-
-# Evaluate recall@10 and ANN latency (example)
-export HNSW_EF_SEARCH=64
-./build/nvdb_hnsw_eval ./out/embeddings_100k.vecbin ./out/hnsw_100k.index ./out/query_100.vecbin 10
-```
-## Results & Performance Report
-
-All experimental results, figures, and methodology are documented in:
-➡️ `performance.md`
-
-Includes:
-- parallel flat-scan benchmarks (500K / 1M / 2.9M)
-- thread scaling and bandwidth ceiling analysis (hybrid Alder Lake effects)
-- AVX2 compute-bound → bandwidth-bound transition
-- FP16 and INT8(+scale) data-movement optimization (AVX2 INT8 kernel)
-- query batching / cache tiling / software prefetch experiments (exploratory)
-- HNSW ANN baseline: efSearch and build-parameter sweeps (recall–latency–memory tradeoff)
-
-### Hardware / Environment (Reference)
-* CPU: Intel Core i7-12700 (8P + 4E / 20 threads), Alder Lake hybrid
-* Memory: 32GB DDR4-3200 dual-channel
-* OS: Arch Linux (Kernel 6.12.63-lts)
-* Compiler: GCC 15.2.1 with -O3 -mavx2 -mfma -pthread
-
+## Hardware / Environment (Reference)
+- CPU: Intel Core i7-12700 (8P + 4E / 20 threads), Alder Lake hybrid
+- Memory: 32GB DDR4-3200 dual-channel
+- OS: Arch Linux (Kernel 6.12.63-lts)
+- Compiler: GCC 15.2.1 (`-O3 -mavx2 -mfma -pthread`)
+- GPU (optional track): NVIDIA RTX 3080 (12GB), CUDA driver/toolkit available
