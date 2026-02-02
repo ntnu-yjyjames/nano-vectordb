@@ -32,7 +32,7 @@ We benchmarked four flat-scan implementations on L2-normalized 384-D embeddings:
   <img alt="Avg Latency vs Dataset Size" src="performance_images/latency_final_light.png">
 </picture>
 
-Figure 1. Average per-query latency vs dataset size (log scale). ST increases roughly linearly with the number of vectors (≈95 → 188 → 540 ms/query), while parallel variants remain close to each other and scale proportionally with dataset size.
+**Figure 1.** Average per-query latency vs dataset size (log scale). ST increases roughly linearly with the number of vectors (≈95 → 188 → 540 ms/query), while parallel variants remain close to each other and scale proportionally with dataset size.
 
 Across all dataset sizes, the single-thread baseline scales approximately linearly with the number of vectors, indicating that end-to-end runtime is dominated by scanning the embedding matrix. In contrast, the parallel variants (OMP/ASYNC/POOL) remain tightly clustered and track each other across sizes, suggesting that once parallelized, performance is primarily constrained by the platform’s memory subsystem rather than compute throughput.
 
@@ -45,7 +45,7 @@ Across all dataset sizes, the single-thread baseline scales approximately linear
 | **async** |      20 |     17.541 | 57.010 |  18.589 |  19.869 |     **5.43×** |
 | **pool**  |      20 |     17.674 | 56.581 |  20.303 |  20.921 |     **5.39×** |
 
-Table 1a. 500K vectors
+**Table 1a.** 500K vectors
 
 | Mode      | Threads | Avg (ms/q) |    QPS |     p95 |     p99 | speedup vs ST |
 | --------- | ------: | ---------: | -----: | ------: | ------: | ------------: |
@@ -54,7 +54,7 @@ Table 1a. 500K vectors
 | **async** |      20 |     36.209 | 27.617 |  39.622 |  40.650 |     **5.19×** |
 | **pool**  |      20 |     37.279 | 26.824 |  43.026 |  46.829 |     **5.05×** |
 
-Table 1b. 1M vectors
+**Table 1b.** 1M vectors
 
 | Mode      | Threads | Avg (ms/q) |   QPS |     p95 |     p99 | speedup vs ST |
 | --------- | ------: | ---------: | ----: | ------: | ------: | ------------: |
@@ -63,13 +63,14 @@ Table 1b. 1M vectors
 | **async** |      20 |    104.246 | 9.593 | 110.408 | 114.750 |     **5.18×** |
 | **pool**  |      20 |    105.285 | 9.498 | 120.553 | 124.335 |     **5.13×** |
 
-Table 1c. 2.9M vectors(full set)
+**Table 1c.** 2.9M vectors(full set)
 ### 2.2 Speedup plateaus around ~5×, indicating bandwidth saturation
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="performance_images/speedup_final_dark.png">
   <img alt="Avg Latency vs Dataset Size" src="performance_images/speedup_final_light.png">
 </picture>
-Figure 2. Speedup relative to ST vs dataset size. All parallel variants converge to a similar speedup envelope of roughly ~5× at 20 threads, and this plateau is largely stable from 500K to 2.9M vectors.
+
+**Figure 2.** Speedup relative to ST vs dataset size. All parallel variants converge to a similar speedup envelope of roughly ~5× at 20 threads, and this plateau is largely stable from 500K to 2.9M vectors.
 
 Despite increasing dataset size, speedup for OMP/ASYNC/POOL remains in a narrow band (~5×). This stability strongly suggests a memory-bandwidth–limited regime: once the scan saturates effective memory bandwidth, additional parallelism provides diminishing returns. In other words, the bottleneck shifts from compute to data movement (RAM → cache → core).
 
@@ -79,14 +80,15 @@ Despite increasing dataset size, speedup for OMP/ASYNC/POOL remains in a narrow 
 | 1M      |     **5.23×**   |      5.19× |     5.05×   |
 | 2.9M    |   4.92×   |  **5.18×**   |    5.13×     |
 
-Table 2. speedup
+**Table 2.** speedup
 
 ### 2.3 Tail stability differs by runtime strategy (p99 / Avg)
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="performance_images/stability_final_dark.png">
   <img alt="Avg Latency vs Dataset Size" src="performance_images/stability_final_light.png">
 </picture>
-Figure 3. Tail stability measured as p99 / Avg (lower is better). This highlights that methods with similar average throughput can differ meaningfully in tail behavior, especially as the working set grows.
+
+**Figure 3.** Tail stability measured as p99 / Avg (lower is better). This highlights that methods with similar average throughput can differ meaningfully in tail behavior, especially as the working set grows.
 
 While average latency for OMP/ASYNC/POOL is similar at each dataset size, tail behavior varies. ASYNC tends to maintain a relatively tight p99/Avg ratio across sizes, whereas OMP and POOL show larger fluctuations at certain dataset sizes. This indicates that at large working-set sizes, system-level effects (scheduler noise, memory-channel contention, page/cache behavior) can meaningfully impact tail latency even when average throughput is bandwidth-limited.
 
@@ -97,7 +99,7 @@ While average latency for OMP/ASYNC/POOL is similar at each dataset size, tail b
 | 1M      |**39.573** |40.650|46.829 |
 | 2.9M    | 123.672|**114.750**|124.335|
 
-Table 3. Tail stability
+**Table 3.** Tail stability
 
 ### 2.4 Key takeaway
 
@@ -109,7 +111,7 @@ To identify the scalability “sweet spot” and quantify diminishing returns, w
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/scalability_final_dark.png"> <img alt="Scalability: Threads vs Throughput (QPS)" src="performance_images/scalability_final_light.png"> </picture>
 
-Figure 4. Scalability on 500K vectors: throughput (QPS) vs thread count for POOL and ASYNC. Both methods improve rapidly at low thread counts and then plateau, consistent with a transition to a memory-bandwidth–limited regime. POOL reaches its peak around 12–16 threads (≈58 QPS) and slightly regresses at 20 threads, while ASYNC increases more smoothly up to 16–20 threads but converges to a similar saturation ceiling.
+**Figure 4.** Scalability on 500K vectors: throughput (QPS) vs thread count for POOL and ASYNC. Both methods improve rapidly at low thread counts and then plateau, consistent with a transition to a memory-bandwidth–limited regime. POOL reaches its peak around 12–16 threads (≈58 QPS) and slightly regresses at 20 threads, while ASYNC increases more smoothly up to 16–20 threads but converges to a similar saturation ceiling.
 
 Overall, both implementations scale strongly up to 8 threads (POOL: 10.4 → 43.5 QPS; ASYNC: 10.1 → 47.7 QPS), after which gains diminish markedly. POOL achieves its highest throughput at 12–16 threads (≈58.3 QPS), suggesting this range is the practical operating point on this platform. Beyond saturation, increasing to 20 threads does not improve throughput and may slightly degrade it (POOL), indicating bandwidth contention and parallel overhead outweigh further parallelism.
 
@@ -126,7 +128,7 @@ Overall, both implementations scale strongly up to 8 threads (POOL: 10.4 → 43.
 |      16 |     17.120 | 58.413 |    **5.62×** |
 |      20 |     17.587 | 56.860 |        5.47× |
 
-Table 4a. 500K — POOL thread scaling
+**Table 4a.** 500K — POOL thread scaling
 
 | threads | Avg (ms/q) |    QPS | speedup vs 1 |
 | ------: | ---------: | -----: | -----------: |
@@ -138,17 +140,19 @@ Table 4a. 500K — POOL thread scaling
 |      16 |     17.822 | 56.112 |    **5.58×** |
 |      20 |     18.231 | 54.852 |        5.45× |
 
-Table 4b. 500K — ASYNC thread scaling
+**Table 4b.** 500K — ASYNC thread scaling
 
 ### 2.6 AVX2/FMA Microbenchmark (Compute-bound → Bandwidth-bound)
 
 To isolate SIMD effects in the dot-product kernel, we compared a scalar-only path (NVDB_FORCE_SCALAR=1) against an AVX2+FMA auto-dispatched path (NVDB_FORCE_SCALAR=0) on the 500K dataset (384-D, k=10, 100 queries). We report both average latency and effective bandwidth to distinguish compute-limited vs bandwidth-limited regimes.
 
-Figure 5. AVX2 effects on latency and bandwidth (500K)
+
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/unified_a_latency_dark.png"> <img src="performance_images/unified_a_latency_light.png"> </picture>
-(a) Latency comparison (log scale). AVX2+FMA dramatically reduces single-thread latency (93.58 → 33.90 ms/query), while showing negligible change under a bandwidth-saturated parallel scan (POOL@16: 17.29 vs 17.31 ms/query).
+
+**Figure 5a.**  Latency comparison (log scale). AVX2+FMA dramatically reduces single-thread latency (93.58 → 33.90 ms/query), while showing negligible change under a bandwidth-saturated parallel scan (POOL@16: 17.29 vs 17.31 ms/query).
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/unified_b_bw_dark.png"> <img src="performance_images/unified_b_bw_light.png"> </picture>
-(b) Memory bandwidth utilization. In ST (1 thread), AVX2+FMA raises effective bandwidth from 8.2 → 22.7 GB/s. In POOL@16, both scalar and AVX2+FMA reach essentially the same bandwidth (~44.4 GB/s), matching the observed memory ceiling.
+
+**Figure 5b.**  Memory bandwidth utilization. In ST (1 thread), AVX2+FMA raises effective bandwidth from 8.2 → 22.7 GB/s. In POOL@16, both scalar and AVX2+FMA reach essentially the same bandwidth (~44.4 GB/s), matching the observed memory ceiling.
 
 | Setting             | Mode | Threads | Avg (ms/q) |    QPS | p95 (ms) | p99 (ms) | bytes/query | Effective BW (GB/s) |
 | ------------------- | ---- | ------: | ---------: | -----: | -------: | -------: | ----------: | ------------------: |
@@ -157,9 +161,9 @@ Figure 5. AVX2 effects on latency and bandwidth (500K)
 | **Scalar (forced)** | POOL |      16 |     17.288 | 57.842 |   17.842 |   18.241 | 768,000,000 |              44.423 |
 | **AVX2+FMA (auto)** | POOL |      16 |     17.307 | 57.782 |   17.841 |   17.926 | 768,000,000 |              44.376 |
 
-Table 5. SIMD impact under different bottleneck regimes (500K vectors)
+**Table 5.** SIMD impact under different bottleneck regimes (500K vectors)
 
-#### Interpretation
+**Interpretation**
 
 This experiment highlights a clear bottleneck transition. In the single-thread regime, performance is compute-limited: AVX2+FMA provides a 2.76× latency reduction (93.58 → 33.90 ms/query) and enables substantially higher effective bandwidth (8.2 → 22.7 GB/s). In contrast, at 16 threads with a pinned thread pool, the scan is already bandwidth-saturated near the platform ceiling (~44–45 GB/s). Consequently, scalar vs AVX2+FMA yields no meaningful end-to-end difference (17.29 vs 17.31 ms/query; ~44.4 GB/s).
 
@@ -171,14 +175,16 @@ This phase evaluates FP16 base embeddings as a data-movement optimization. Since
 
 ### 3.1 FP16 reaches bandwidth saturation at low thread counts
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/bw_sat_dark.png"> <img  src="performance_images/bw_sat_light.png"> </picture>
-Figure 4. Effective bandwidth vs thread count (500K, FP16, OMP). Bandwidth increases rapidly from 1→4 threads and begins saturating around ~8 threads, remaining near ~39–41 GB/s thereafter. The dashed line indicates the measured peak bandwidth ceiling (~44.4 GB/s).
 
-Interpretation. FP16 reduces bytes/query by 2× relative to FP32, so the scan becomes bandwidth-limited sooner. After ~8 threads, increasing thread count provides little additional bandwidth, indicating that further throughput gains require reducing data movement (bytes/query) rather than adding CPU parallelism.
+**Figure 6.** Effective bandwidth vs thread count (500K, FP16, OMP). Bandwidth increases rapidly from 1→4 threads and begins saturating around ~8 threads, remaining near ~39–41 GB/s thereafter. The dashed line indicates the measured peak bandwidth ceiling (~44.4 GB/s).
+
+**Interpretation.** FP16 reduces bytes/query by 2× relative to FP32, so the scan becomes bandwidth-limited sooner. After ~8 threads, increasing thread count provides little additional bandwidth, indicating that further throughput gains require reducing data movement (bytes/query) rather than adding CPU parallelism.
 
 
 ### 3.2 FP16 throughput at a fixed 8 threads (POOL vs OMP across sizes)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/qps_comparison_8threads_dark.png"> <img src="performance_images/qps_comparison_8threads_light.png"> </picture>
-Figure 5. FP16 throughput comparison at 8 threads across dataset sizes. POOL and OMP achieve similar QPS at 500K, and remain close at 1M and 2.9M, consistent with both being constrained by the same memory ceiling.
+
+**Figure 7.** FP16 throughput comparison at 8 threads across dataset sizes. POOL and OMP achieve similar QPS at 500K, and remain close at 1M and 2.9M, consistent with both being constrained by the same memory ceiling.
 
 | Dataset | Method | Threads | Avg (ms/q) |     QPS | p95 (ms) | p99 (ms) |   bytes/query | Effective BW (GB/s) |
 | ------- | ------ | ------: | ---------: | ------: | -------: | -------: | ------------: | ------------------: |
@@ -189,14 +195,15 @@ Figure 5. FP16 throughput comparison at 8 threads across dataset sizes. POOL and
 | 2.9M    | POOL   |       8 |     51.445 |  19.438 |   54.710 |   56.109 | 2,229,545,472 |              43.339 |
 | 2.9M    | OMP    |       8 |     50.451 |  19.821 |   51.174 |   51.906 | 2,229,545,472 |              44.193 |
 
-Table 6. FP16 @ 8 threads (k=10, 100 queries, 384-D)
+**Table 6.** FP16 @ 8 threads (k=10, 100 queries, 384-D)
 
-Interpretation. With FP16 bases, both POOL and OMP at 8 threads reach ~42–45 GB/s effective bandwidth across sizes. Differences in QPS are small, indicating both methods are bounded by the same memory subsystem. At larger working sets (1M/2.9M), OMP slightly improves bandwidth utilization and tail latency (p95/p99), while POOL remains competitive but shows higher tail in some runs.
+**Interpretation.** With FP16 bases, both POOL and OMP at 8 threads reach ~42–45 GB/s effective bandwidth across sizes. Differences in QPS are small, indicating both methods are bounded by the same memory subsystem. At larger working sets (1M/2.9M), OMP slightly improves bandwidth utilization and tail latency (p95/p99), while POOL remains competitive but shows higher tail in some runs.
 
 
 ### 3.3 Hybrid (Alder Lake) “sweet spot”: more threads can worsen tail latency
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/stability_qps_dark.png"> <img src="performance_images/stability_qps_light.png"> </picture>
-Figure 6. 1M FP16 POOL: throughput (QPS) and stability (p99/Avg) vs threads. 8 threads yields the best throughput and stable tail behavior, while 16 threads shows a noticeably higher p99/Avg ratio, indicating degraded tail latency.
+
+**Figure 8.** 1M FP16 POOL: throughput (QPS) and stability (p99/Avg) vs threads. 8 threads yields the best throughput and stable tail behavior, while 16 threads shows a noticeably higher p99/Avg ratio, indicating degraded tail latency.
 
 | Threads | Avg (ms/q) |    QPS | p95 (ms) | p99 (ms) | p99/Avg |
 | ------: | ---------: | -----: | -------: | -------: | ------: |
@@ -204,7 +211,7 @@ Figure 6. 1M FP16 POOL: throughput (QPS) and stability (p99/Avg) vs threads. 8 t
 |      12 |     18.053 | 55.393 |   18.702 |   18.786 |   1.041 |
 |      16 |     17.856 | 56.005 |   20.209 |   21.561 |   1.208 |
 
-Table 7. 1M FP16 POOL thread sensitivity (k=10, 100 queries)
+**Table 7.** 1M FP16 POOL thread sensitivity (k=10, 100 queries)
 
 Interpretation (Hybrid CPU). The i7-12700 (8P + 4E, 20 threads) is a hybrid architecture. Under FP16, bandwidth saturation occurs at relatively low thread counts (often near the P-core count). Increasing threads beyond this point does not improve effective bandwidth and may worsen tail latency due to contention and straggler effects (E-cores and/or SMT siblings). Therefore, for FP16 scans, 8 threads is a robust operating point on this platform.
 
@@ -227,7 +234,7 @@ To extend the FP16-base experiments, we further reduce data movement by quantizi
 ### 3B.1 INT8 improves throughput across dataset sizes
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P4B_1_Throughput_dark.png"> <img alt="Figure P4B-1: Throughput vs Dataset Size" src="performance_images/P4B_1_Throughput_light.png"> </picture>
 
-Figure 7. Throughput (QPS) vs dataset size comparing FP16 and INT8 bases (OMP@8). INT8 achieves ~1.8–1.9× higher throughput across sizes, approaching the ideal gain expected from reducing bytes/query.
+**Figure 9.** Throughput (QPS) vs dataset size comparing FP16 and INT8 bases (OMP@8). INT8 achieves ~1.8–1.9× higher throughput across sizes, approaching the ideal gain expected from reducing bytes/query.
 
 bytes/query counts base-vector payload reads (plus INT8 per-row scale), excluding query reuse and top-k bookkeeping.
 
@@ -242,7 +249,7 @@ bytes/query counts base-vector payload reads (plus INT8 per-row scale), excludin
 | 2.9M    | INT8 (+scale) |         26.340 |  37.966 |   27.572 |   29.721 | 1,126,384,952 |
 
 
-Table 8. FP16 vs INT8 (OMP@8)
+**Table 8.** FP16 vs INT8 (OMP@8)
 
 Observed throughput speedup (INT8 vs FP16) is 1.89× (500K), 1.82× (1M),
 and 1.90× (2.9M).
@@ -250,7 +257,7 @@ and 1.90× (2.9M).
 ### 3B.2 Payload-equivalent bandwidth stays in the same 42–45 GB/s regime
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P4B_2_Bandwidth_Refined_dark.png"> <img alt="Figure P4B-2: Payload-equivalent Bandwidth vs Dataset Size" src="performance_images/P4B_2_Bandwidth_Refined_light.png"> </picture>
 
-Figure 8. Payload-equivalent bandwidth vs dataset size (OMP@8; y-axis zoomed). Both FP16 and INT8 saturate in the ~42–45 GB/s range, indicating the same bandwidth-saturation regime; INT8 improves QPS primarily by reducing bytes/query rather than increasing physical memory bandwidth.
+**Figure 10.** Payload-equivalent bandwidth vs dataset size (OMP@8; y-axis zoomed). Both FP16 and INT8 saturate in the ~42–45 GB/s range, indicating the same bandwidth-saturation regime; INT8 improves QPS primarily by reducing bytes/query rather than increasing physical memory bandwidth.
 
 | Dataset | FP16 BW (GB/s) | INT8 BW (GB/s) |
 | ------- | -------------: | -------------: |
@@ -259,7 +266,7 @@ Figure 8. Payload-equivalent bandwidth vs dataset size (OMP@8; y-axis zoomed). B
 | 2.9M    |         44.574 |         42.764 |
 
 
-Table 9. Payload-equivalent bandwidth (OMP@8)
+**Table 9.** Payload-equivalent bandwidth (OMP@8)
 **Interpretation.** INT8 reduces bytes/query by ~2× relative to FP16 (dim·1B + 4B scale vs dim·2B). Once the scan is bandwidth-limited, throughput increases close to proportionally. The remaining gap to the ideal 2× is attributable to dequantization overhead (int8→float conversion and scaling) and fixed per-query costs (top-k maintenance and parallel overhead). Notably, tail latency (p95/p99) improves substantially under INT8 at large scale, consistent with reduced data movement pressure. This confirms that, once bandwidth-limited, INT8 acts primarily as a data-movement optimization rather than a compute optimization.
 
 ### 3B.3 Takeaways
@@ -274,7 +281,8 @@ We extend Section 3 by introducing **query batching**: processing multiple queri
 
 ### 4.1 Query batching: throughput scales strongly with batch size
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_QPS_dark.png"> <img src="performance_images/QB_QPS_light.png"> </picture>
-Figure 9. QPS vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+
+**Figure 11.** QPS vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
 
 Both POOL and OMP benefit from batching, but OMP achieves substantially higher throughput at larger batch sizes. 
 
@@ -287,7 +295,7 @@ Both POOL and OMP benefit from batching, but OMP achieves substantially higher t
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/QB_P99_dark.png"> <img src="performance_images/QB_P99_light.png"> </picture>
 
-Figure 10. Batch-level p99 vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
+**Figure 12.** Batch-level p99 vs batch size (Fullset FP16, 2.9M, threads=8, tile=1024).
 Batching not only increases throughput but also substantially reduces batch-level p99 compared to `batch_q=1` . OMP remains consistently tighter than POOL.
 
 * **OMP@8 p99 (batch ms)**: 52.0 → 26.7 → 15.2 → 14.0
@@ -306,7 +314,7 @@ To test whether tile granularity affects performance under batching, we swept `t
 |      1024 |         16.501 | 60.604 |         66.002 |         74.511 |         77.026 |
 |      2048 |         16.433 | 60.852 |         65.734 |         74.688 |         77.909 |
 
-Table 10. Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
+**Table 10.** Tile size sweep (Fullset FP16, POOL@8, batch_q=4)
 
 **Interpretation.** With query batching enabled, performance is largely dominated by query reuse and merge/overhead rather than tile granularity in the tested range. We therefore adopt **tile_vecs=1024** as a stable default.
 
@@ -325,11 +333,11 @@ After enabling query batching and cache tiling, we evaluated explicit software p
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_QPS_dark.png"> <img src="performance_images/P5_3_QPS_light.png"> </picture>
 
-Figure 11. QPS vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+**Figure 13.** QPS vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P5_3_P99_dark.png"> <img src="performance_images/P5_3_P99_light.png"> </picture>
 
-Figure 12. Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
+**Figure 14.** Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 
 | prefetch_dist | Avg_query (ms) |    QPS | Avg_batch (ms) | batch_p95 (ms) | batch_p99 (ms) | batch_samples |
 | ------------: | -------------: | -----: | -------------: | -------------: | -------------: | ------------: |
@@ -338,7 +346,7 @@ Figure 12. Batch p99 vs Prefetch Distance (OMP@8, batch_q=4, Q=1000)
 |            16 |         14.462 | 69.145 |         57.849 |         62.358 |         64.664 |           250 |
 |            32 |         13.916 | 71.861 |         55.663 |         58.819 |         61.084 |           250 |
 
-Table 11. Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+**Table 11.** Prefetch sweep (tile_vecs=512, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
 At `tile_vecs=512`, software prefetching shows **no consistent throughput improvement**. Short distances (8/16) reduce QPS and worsen batch-level tail latency, while `prefetch_dist=32` is statistically similar to the no-prefetch baseline.
 
@@ -358,8 +366,7 @@ At `tile_vecs=512`, software prefetching shows **no consistent throughput improv
 |            32 |         13.909 | 71.897 |         55.635 |         59.026 |         60.482 |           250 |
 |            64 |         13.993 | 71.464 |         55.972 |         59.289 |         59.906 |           250 |
 
-
-Table 12 . Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
+**Table 12 .** Prefetch sweep (tile_vecs=8192, batch_q=4, Q=1000, OMP@8, FP16 fullset)
 
 
 To stress cache behavior further, we repeated the sweep at `tile_vecs=8192`. Most distances remain close to the baseline, but an intermediate distance (`prefetch_dist=16`) significantly degrades performance and tail latency.
@@ -381,7 +388,7 @@ To examine whether data reduction (INT8) and cache reuse (query batching) compos
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P7_Batching_QPS_dark.png"> <img alt="Figure 12: Throughput vs Batch Size (FP16 vs INT8)" src="performance_images/P7_Batching_QPS_light.png"> </picture>
 
-Figure 12. Throughput (QPS) vs batch size on the 2.9M fullset (k=10, Q=1000, OMP@8, tile_vecs=512). INT8 maintains a consistent ~1.85–1.90× throughput advantage over FP16 across batch sizes, while both benefit strongly from batching.
+**Figure 15.** Throughput (QPS) vs batch size on the 2.9M fullset (k=10, Q=1000, OMP@8, tile_vecs=512). INT8 maintains a consistent ~1.85–1.90× throughput advantage over FP16 across batch sizes, while both benefit strongly from batching.
 
 | dtype | batch_q | Avg_query (ms) |      QPS | Avg_batch (ms) | batch_p99 (ms) | batch_samples |
 | ----- | ------: | -------------: | -------: | -------------: | -------------: | ------------: |
@@ -394,19 +401,19 @@ Figure 12. Throughput (QPS) vs batch size on the 2.9M fullset (k=10, Q=1000, OMP
 | INT8  |       4 |         10.406 |   96.097 |         41.625 |         50.319 |           250 |
 | INT8  |       8 |         9.356* | 106.884* |        74.849* |        85.847* |           125 |
 
-Table 13. Throughput scaling with batching (Fullset 2.9M, OMP@8, tile=512)
+**Table 13.** Throughput scaling with batching (Fullset 2.9M, OMP@8, tile=512)
 
-\* INT8 `batch_q=8` values are reported as the mean of two repeated runs (to reduce sensitivity from the smaller batch sample count).
+INT8 `batch_q=8` values are reported as the mean of two repeated runs (to reduce sensitivity from the smaller batch sample count).
 
 > Note: batch-level tail metrics (Avg_batch, batch_p99) are defined only for `batch_q > 1` (Route A). For `batch_q = 1`, we report per-query latency percentiles elsewhere.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P7_2_Batch_P99_dark.png"> <img alt="Figure 13: Batch p99 vs Batch Size (FP16 vs INT8)" src="performance_images/P7_2_Batch_P99_light.png"> </picture>
 
-Figure 13. Batch-level p99 latency vs batch size (`batch_q ∈ {2,4,8})` under the same setup. While batching increases throughput, it also increases **batch-level tail (p99)**. INT8 consistently yields lower batch p99 than FP16 at the same batch size.
+**Figure 16.** Batch-level p99 latency vs batch size (`batch_q ∈ {2,4,8})` under the same setup. While batching increases throughput, it also increases **batch-level tail (p99)**. INT8 consistently yields lower batch p99 than FP16 at the same batch size.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P7_3_Dominance_dark.png"> <img alt="Figure 14: Throughput vs Tail Latency Frontier (FP16 vs INT8)" src="performance_images/P7_3_Dominance_light.png"> </picture>
 
-Figure 14. Efficiency frontier (QPS vs batch p99). INT8 points lie strictly up-left of FP16 for all tested batch sizes, indicating a dominant tradeoff curve: higher throughput at lower tail latency within this configuration.
+**Figure 17.** Efficiency frontier (QPS vs batch p99). INT8 points lie strictly up-left of FP16 for all tested batch sizes, indicating a dominant tradeoff curve: higher throughput at lower tail latency within this configuration.
 
 **Interpretation**
 
@@ -434,11 +441,11 @@ We sweep `efSearch ∈ {16, 32, 64, 128, 256}` while holding the index build con
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_1_Tradeoff_Updated_dark.png"> <img alt="Figure P6-1: Recall vs P99 Latency Tradeoff" src="performance_images/P6_1_Tradeoff_Updated_light.png"> </picture>
 
-Figure 15. Recall@10 vs ANN p99 latency (ms) for efSearch sweeps on 500K / 1M / 2.9M. Higher efSearch improves recall but increases tail latency. The “knee” typically occurs around efSearch≈64, where recall approaches ~0.98–0.99 with sub-millisecond p99.
+**Figure 18.** Recall@10 vs ANN p99 latency (ms) for efSearch sweeps on 500K / 1M / 2.9M. Higher efSearch improves recall but increases tail latency. The “knee” typically occurs around efSearch≈64, where recall approaches ~0.98–0.99 with sub-millisecond p99.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_2_AvgLatency_V2_dark.png"> <img alt="Figure P6-2: Recall vs Average Latency Tradeoff" src="performance_images/P6_2_AvgLatency_V2_light.png"> </picture>
 
-Figure 16. Recall@10 vs ANN average latency (ms/query). Average latency rises smoothly with efSearch and mirrors the tail trend, with rapidly diminishing returns in recall beyond efSearch≈128.
+**Figure 19.** Recall@10 vs ANN average latency (ms/query). Average latency rises smoothly with efSearch and mirrors the tail trend, with rapidly diminishing returns in recall beyond efSearch≈128.
 
 | Dataset | dtype | efSearch | Recall@10 | ANN Avg (ms) | ANN p95 (ms) | ANN p99 (ms) |   ANN QPS |
 | ------- | ----- | -------: | --------: | -----------: | -----------: | -----------: | --------: |
@@ -458,7 +465,7 @@ Figure 16. Recall@10 vs ANN average latency (ms/query). Average latency rises sm
 | 2.9M    | FP16  |      128 |    0.9965 |        0.396 |        0.514 |        0.706 |  2522.522 |
 | 2.9M    | FP16  |      256 |    0.9977 |        0.682 |        0.864 |        1.096 |  1466.850 |
 
-Table 14. efSearch sweep (ANN-only latency; k=10, Q=1000)
+**Table 14.** efSearch sweep (ANN-only latency; k=10, Q=1000)
 
 **Interpretation.** efSearch controls the breadth of candidate exploration at query time. Across sizes, `efSearch=64` provides a strong knee point: recall ≈0.98–0.99 with p99 remaining below ~0.4 ms (ANN-only). Increasing to `efSearch=128–256` yields marginal recall gains but a disproportionate increase in tail latency (p99 approaching or exceeding ~0.7–1.1 ms).
 
@@ -468,11 +475,11 @@ To characterize the second major HNSW axis—index construction quality vs searc
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_3_BuildConfigs_dark.png"> <img alt="Figure P6-3: Build Configs vs Search Performance" src="performance_images/P6_3_BuildConfigs_light.png"> </picture>
 
-Figure 17. Build configurations (M, efConstruction) plotted as Recall@10 vs ANN p99 at fixed efSearch=64 (500K, FP32 base). Increasing M generally improves recall but increases tail latency.
+**Figure 20.** Build configurations (M, efConstruction) plotted as Recall@10 vs ANN p99 at fixed efSearch=64 (500K, FP32 base). Increasing M generally improves recall but increases tail latency.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6_4_MemoryRecall_dark.png"> <img alt="Figure P6-4: Recall vs Memory Footprint" src="performance_images/P6_4_MemoryRecall_light.png"> </picture>
 
-Figure 18. Recall@10 vs index size (MB) for build sweeps at efSearch=64. Index size scales primarily with M, while efConstruction mainly affects recall at approximately constant footprint. Labels show ANN p99 latency.
+**Figure 21.** Recall@10 vs index size (MB) for build sweeps at efSearch=64. Index size scales primarily with M, while efConstruction mainly affects recall at approximately constant footprint. Labels show ANN p99 latency.
 
 |  M | efConstruction | Recall@10 | ANN Avg (ms) | ANN p95 (ms) | ANN p99 (ms) |  ANN QPS | Index size (MB) | Note                     |
 | -: | -------------: | --------: | -----------: | -----------: | -----------: | -------: | --------------: | ------------------------ |
@@ -483,7 +490,7 @@ Figure 18. Recall@10 vs index size (MB) for build sweeps at efSearch=64. Index s
 | 16 |            200 |    0.9796 |        0.215 |        0.308 |        0.379 | 4657.768 |             804 | baseline hnsw_500k.index |
 | 24 |            200 |    0.9892 |        0.248 |        0.312 |        0.347 | 4034.150 |             834 |                          |
 
-Table 15. Build sweep summary (500K FP32 base; efSearch=64; k=10; Q=1000)
+**Table 15.** Build sweep summary (500K FP32 base; efSearch=64; k=10; Q=1000)
 
 **Interpretation.**
 
@@ -511,7 +518,7 @@ We report **Recall@10**, **ANN Avg latency**, and **ANN tail latency (p95/p99)**
 ### 5B.1 IVF Recall Surface (nlist × nprobe)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_IVF_Heatmap_dark.png"> <img alt="IVF Recall Surface (nlist vs nprobe)" src="performance_images/P8_IVF_Heatmap_light.png"> </picture>
 
-Figure 19. IVF Recall@10 surface for `nlist ∈ {1024, 4096} `and `nprobe ∈ {1,4,8,16,32,64,128,256}` .Recall increases monotonically with `nprobe` for both `nlist` settings, approaching ≥0.99 at sufficiently large `nprobe`.
+**Figure 22.** IVF Recall@10 surface for `nlist ∈ {1024, 4096} `and `nprobe ∈ {1,4,8,16,32,64,128,256}` .Recall increases monotonically with `nprobe` for both `nlist` settings, approaching ≥0.99 at sufficiently large `nprobe`.
 
 **Observation.**
 
@@ -522,7 +529,7 @@ For this dataset and training budget (`train=200k`), `nlist=1024 `reaches high r
 ### 5B.2 IVF Tail Latency Surface (p99)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_2_IVF_P99_Heatmap_dark.png"> <img alt="IVF P99 Surface (nlist vs nprobe)" src="performance_images/P8_2_IVF_P99_Heatmap_light.png"> </picture>
 
-Figure 20. IVF p99 latency surface (ms). Tail latency grows rapidly with `nprobe`, reflecting larger candidate expansions and more list scans per query.
+**Figure 23.** IVF p99 latency surface (ms). Tail latency grows rapidly with `nprobe`, reflecting larger candidate expansions and more list scans per query.
 
 **Observation.**
 
@@ -533,7 +540,7 @@ At very large `nprobe`, `nlist=1024` can exhibit a sharper tail escalation than 
 ### 5B.3 Recall–Tail Tradeoff (Offset Labels)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P8_3_IVF_Tradeoff_dark.png"> <img alt="IVF Recall–P99 Tradeoff" src="performance_images/P8_3_IVF_Tradeoff_light.png"> </picture>
 
-Figure 21. Recall@10 vs ANN p99 latency tradeoff for IVF-Flat. Each curve is a fixed `nlist`, and labels indicate `nprobe` values.
+**Figure 24.** Recall@10 vs ANN p99 latency tradeoff for IVF-Flat. Each curve is a fixed `nlist`, and labels indicate `nprobe` values.
 
 **Interpretation.**
 
@@ -560,7 +567,7 @@ For very high recall targets (≥0.99), `nprobe` must increase to 128–256, but
 |  4096 |    128 |    0.9917 |        1.614 |        1.967 |        3.590 |  619.580 |             743 |         13.869 |        4.819 |
 |  4096 |    256 |    0.9978 |        2.755 |        3.359 |        4.163 |  362.962 |             743 |         13.869 |        4.819 |
 
-Table 16. IVF-Flat sweep results (500K FP16, train=200k, Q=1000, k=10)
+**Table 16.** IVF-Flat sweep results (500K FP16, train=200k, Q=1000, k=10)
 
 ### 5B.4 Build cost and index footprint
 
@@ -571,7 +578,7 @@ Although `nlist` strongly affects training time, the resulting index footprint c
 |  1024 |          3.751 |        1.466 |             738 |
 |  4096 |         13.869 |        4.819 |             743 |
 
-Table 17. Build summary (fixed train=200k, N=500K)
+**Table 17.** Build summary (fixed train=200k, N=500K)
 
 ### 5B.5 Takeaways
 
@@ -593,7 +600,7 @@ In addition to recall-mode evaluation, we optionally run `EVAL_MODE=ann_only` to
 |  4096 |     32 |      0.474–0.483 |      0.604–0.618 |      0.648–0.741 |
 |  4096 |     64 |      0.785–0.797 |      1.005–1.023 |      1.083–1.123 |
 
-Table 18. ANN-only latency variance check (EVAL_MODE=ann_only, Q=1000, k=10)
+**Table 18.** ANN-only latency variance check (EVAL_MODE=ann_only, Q=1000, k=10)
 
 ### 5B.6 Transition
 
@@ -607,7 +614,7 @@ To summarize the staged improvements in quantization-based ANN, we compare three
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/Stages_Evolution_dark.png"> <img alt="Optimization stages: Recall vs Total P99" src="performance_images/Stages_Evolution_light.png"> </picture>
 
-Figure 22. Stage-wise tradeoff between accuracy and tail latency. Bars show Recall@10; the line shows TOTAL p99 latency (ANN search + optional refine). Configuration: 500K vectors, FP16 base, `nlist=4096`, `nprobe=64,` `k=10`, `Q=1000`.
+**Figure 25.** Stage-wise tradeoff between accuracy and tail latency. Bars show Recall@10; the line shows TOTAL p99 latency (ANN search + optional refine). Configuration: 500K vectors, FP16 base, `nlist=4096`, `nprobe=64,` `k=10`, `Q=1000`.
 
 | Stage                      | Index size (MB) | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) |
 | -------------------------- | --------------: | --------: | -----------: | -----------: | -------------: | -------------: |
@@ -615,7 +622,7 @@ Figure 22. Stage-wise tradeoff between accuracy and tail latency. Bars show Reca
 | IVF-OPQ-PQ (m=64, b=8)     |              42 |    0.7657 |        0.794 |        1.309 |          0.794 |          1.309 |
 | IVF-OPQ-PQ + Refine (R=50) |              42 |    0.9743 |        0.595 |        0.785 |          0.643 |          0.857 |
 
-Table 19. Stage summary (fixed nlist=4096, nprobe=64)
+**Table 19.** Stage summary (fixed nlist=4096, nprobe=64)
 
 #### Interpretation
 
@@ -634,15 +641,15 @@ We next characterize how **candidate quality** (controlled by `nprobe`) and **ex
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_Recall_Surface_Heatmap_dark.png"> <img alt="Recall surface: nprobe x refine_k" src="performance_images/P6C2_Recall_Surface_Heatmap_light.png"> </picture>
 
-Figure 23. **Recall surface** over `nprobe` × `REFINE_K` (OPQ-PQ, `nlist=4096`, `Q=1000`, `k=10`). Refinement produces large recall gains once REFINE_K ≥ 20, and benefits saturate near REFINE_K≈50 for mid/high nprobe.
+**Figure 26.** **Recall surface** over `nprobe` × `REFINE_K` (OPQ-PQ, `nlist=4096`, `Q=1000`, `k=10`). Refinement produces large recall gains once REFINE_K ≥ 20, and benefits saturate near REFINE_K≈50 for mid/high nprobe.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_P99_Surface_Heatmap_dark.png"> <img alt="Total p99 surface: nprobe x refine_k" src="performance_images/P6C2_P99_Surface_Heatmap_light.png"> </picture>
 
-Figure 24. **TOTAL p99 surface** (ANN + refinement) over `nprobe` × `REFINE_K`. Tail latency is dominated by search width at large `nprobe`, with additional tail inflation when refinement becomes heavy (large `REFINE_K`) or when system-level variance appears under higher load.
+**Figure 27.** **TOTAL p99 surface** (ANN + refinement) over `nprobe` × `REFINE_K`. Tail latency is dominated by search width at large `nprobe`, with additional tail inflation when refinement becomes heavy (large `REFINE_K`) or when system-level variance appears under higher load.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C2_Pareto_Frontier_dark.png"> <img alt="Pareto frontier: recall vs total p99" src="performance_images/P6C2_Pareto_Frontier_light.png"> </picture>
 
-Figure 25. **Pareto frontier** in (Recall@10, TOTAL p99). Marker shape encodes `nprobe`; color encodes `REFINE_K`. The dashed curve shows the Pareto-efficient subset (higher recall with no worse tail).
+**Figure 28.** **Pareto frontier** in (Recall@10, TOTAL p99). Marker shape encodes `nprobe`; color encodes `REFINE_K`. The dashed curve shows the Pareto-efficient subset (higher recall with no worse tail).
 
 #### Key observations
 
@@ -659,7 +666,7 @@ From Figure 23/25, strong points cluster around:
 When comparing ANN vs TOTAL tails, the refinement cost is **Δ = TOTAL p99 − ANN p99** (same for averages). In most mid-range settings, Δ is small (tens of microseconds to ~0.1 ms), showing refinement is efficient when candidate sets are already high-quality. Occasional small non-monotonicity (e.g., TOTAL p99 at `REFINE_K=100` slightly lower/higher than nearby points) is consistent with run-to-run variance (scheduler/cache state), not a stable algorithmic reversal.
 
 **4.Large `nprobe` can amplify tail variance.**
-Figure 24 shows that tails can spike for some high-load combinations (e.g., `nprobe=128`, `REFINE_K=10`), even when recall does not improve. This supports treating “very wide probing + shallow refinement” as an inefficient region: it increases work and variance without meaningful quality gains.
+**Figure 27.** shows that tails can spike for some high-load combinations (e.g., `nprobe=128`, `REFINE_K=10`), even when recall does not improve. This supports treating “very wide probing + shallow refinement” as an inefficient region: it increases work and variance without meaningful quality gains.
 
 | nprobe | REFINE_K | Recall@10 | ANN p99 (ms) | TOTAL p99 (ms) |
 | -----: | -------: | --------: | -----------: | -------------: |
@@ -679,11 +686,9 @@ Figure 24 shows that tails can spike for some high-load combinations (e.g., `npr
 |    128 |       20 |    0.9434 |        1.730 |          1.760 |
 |    128 |       50 |    0.9896 |        2.180 |          2.230 |
 
-Table 20. `nprobe` × `REFINE_K` grid (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`, `k=10`). TOTAL includes both candidate generation and refinement.
+**Table 20.** `nprobe` × `REFINE_K` grid (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`, `k=10`). TOTAL includes both candidate generation and refinement.
 
 Full grid (25 points) is provided in results_refine_sweep/refine_grid_opq_m64_np_rk.csv.
-
-
 
 
 ### 5C.2 Refinement yield vs. budget (fixed `nprobe=64`)
@@ -692,11 +697,11 @@ We quantify the marginal yield of exact L2 refinement by sweeping `REFINE_K ∈ 
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C3_Yield_Curve_Recall_dark.png"> <img alt="Yield curve: Recall@10 gains via REFINE_K" src="performance_images/P6C3_Yield_Curve_Recall_light.png"> </picture>
 
-Figure 26. Yield curve (Recall@10 vs `REFINE_K`) at `nprobe=64` under OPQ-PQ (m=64, b=8). Recall exhibits strong diminishing returns: most gains arrive by `REFINE_K≈20–50`, with minimal improvement beyond 50.
+**Figure 29.** Yield curve (Recall@10 vs `REFINE_K`) at `nprobe=64` under OPQ-PQ (m=64, b=8). Recall exhibits strong diminishing returns: most gains arrive by `REFINE_K≈20–50`, with minimal improvement beyond 50.
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C3_Cost_Curve_P99_dark.png"> <img alt="Cost curve: TOTAL p99 vs REFINE_K, with ANN baseline" src="performance_images/P6C3_Cost_Curve_P99_light.png"> </picture>
 
-Figure 27. Tail-latency cost curve (p99 vs `REFINE_K`). **ANN p99** denotes candidate generation only; TOTAL p99 includes refinement. In our runs, minor non-monotonicity in p99 across neighboring points can occur within normal run-to-run variance (scheduler/cache state).
+**Figure 30.** Tail-latency cost curve (p99 vs `REFINE_K`). **ANN p99** denotes candidate generation only; TOTAL p99 includes refinement. In our runs, minor non-monotonicity in p99 across neighboring points can occur within normal run-to-run variance (scheduler/cache state).
 
 | REFINE_K | k_search | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) | Δp99 (ms) |
 | -------: | -------: | --------: | -----------: | -----------: | -------------: | -------------: | --------: |
@@ -706,7 +711,7 @@ Figure 27. Tail-latency cost curve (p99 vs `REFINE_K`). **ANN p99** denotes cand
 |      100 |      100 |    0.9758 |        0.559 |        0.668 |          0.641 |          0.781 |     0.113 |
 
 
-Table 21. Refinement sweep summary at `nprobe=64` (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`,` k=10`). Δp99 is defined as **TOTAL p99 − ANN p99**.
+**Table 21.** Refinement sweep summary at `nprobe=64` (OPQ-PQ, `nlist=4096`, 500K FP16, `Q=1000`,` k=10`). Δp99 is defined as **TOTAL p99 − ANN p99**.
 
 **Interpretation.** Refinement is highly cost-effective up to `REFINE_K≈50`: recall rises from **0.7656 → 0.9319** at `REFINE_K=20`, then to **0.9743** at `REFINE_K=50`, while the incremental tail cost remains small (Δp99 ≤ **0.049 ms**). Increasing to `REFINE_K=100` yields negligible accuracy gain (**0.9758**) but higher average cost (TOTAL Avg **0.641 ms**) and a larger Δp99 (**0.113 ms**), suggesting `REFINE_K≈50` as a practical sweet spot for this workload.
 
@@ -716,7 +721,7 @@ To test whether refinement behavior is robust across different candidate-set qua
 
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/P6C_Refine_Accuracy_Tail_Frontier_dark.png"> <img alt="Accuracy–tail frontier under refinement" src="performance_images/P6C_Refine_Accuracy_Tail_Frontier_light.png"> </picture>
 
-Figure 28. Accuracy–tail frontier under fixed refinement (`REFINE_K=50`). Each point corresponds to a different `nprobe` (OPQ-PQ, `nlist=4096`, `k=10`, `Q=1000`, FP16 base).
+**Figure 31.** Accuracy–tail frontier under fixed refinement (`REFINE_K=50`). Each point corresponds to a different `nprobe` (OPQ-PQ, `nlist=4096`, `k=10`, `Q=1000`, FP16 base).
 
 | nprobe | Recall@10 | ANN Avg (ms) | ANN p99 (ms) | TOTAL Avg (ms) | TOTAL p99 (ms) |
 | -----: | --------: | -----------: | -----------: | -------------: | -------------: |
@@ -727,7 +732,7 @@ Figure 28. Accuracy–tail frontier under fixed refinement (`REFINE_K=50`). Each
 |    128 |    0.9896 |        0.926 |        1.250 |          0.973 |          1.310 |
 
 
-Table 22. `nprobe` sweep with fixed refinement (`REFINE_K=50`).
+**Table 22.** `nprobe` sweep with fixed refinement (`REFINE_K=50`).
 
 **Interpretation.** With `REFINE_K` held constant, recall improves predictably as `nprobe` increases (better candidates), and begins to saturate around `nprobe≈64` for this configuration. Latency increases with `nprobe` as expected due to heavier list probing and a larger candidate pool to score and re-rank.
 
