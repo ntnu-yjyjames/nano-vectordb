@@ -27,6 +27,14 @@ public:
 
   // Backward compatible: only valid if dataset is float32
   const float* vector_ptr(uint64_t i) const { return vector_ptr_f32(i); }
+  // Raw payload pointer to contiguous vector matrix (vecbin payload).
+  // For fp32: points to float[N*D]
+  // For fp16: points to uint16_t[N*D]
+  // For int8: points to int8_t[N*D]  (if you later add)
+  const void* data_ptr() const;
+
+  const float* data_ptr_f32() const { return vectors_f32_; }
+  const uint16_t* data_ptr_f16() const { return vectors_f16_; }
 
 private:
   MmapFile mm_;

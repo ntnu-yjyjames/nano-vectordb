@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(NanoVectorDB LANGUAGES CXX)  
+option(NVDB_WITH_FAISS "Build FAISS-based IVF tools" ON)
 
 # set complier arguments
 set(CMAKE_CXX_STANDARD 17)    
@@ -72,36 +73,74 @@ add_executable(nvdb_hnsw_search apps/nvdb_hnsw_search.cpp)
 target_link_libraries(nvdb_hnsw_search PRIVATE nvdb)
 target_include_directories(nvdb_hnsw_search PRIVATE third_party/hnswlib)
 
+
 # ---- FAISS (optional; required for IVF tools) ----
 set(FAISS_ROOT "$ENV{FAISS_ROOT}")
 if(FAISS_ROOT STREQUAL "")
   set(FAISS_ROOT "$ENV{HOME}/.local")
 endif()
 
+# Look for libfaiss in lib or lib64
 find_library(FAISS_LIB
   NAMES faiss libfaiss.a libfaiss.so
-  HINTS "${FAISS_ROOT}/lib"
+  HINTS "${FAISS_ROOT}/lib" "${FAISS_ROOT}/lib64"
 )
 
-if (FAISS_LIB)
+# (optional) FAISS headers check (prevents confusing include errors)
+find_path(FAISS_INCLUDE_DIR
+  NAMES faiss/Index.h
+  HINTS "${FAISS_ROOT}/include"
+)
+
+if (FAISS_LIB AND FAISS_INCLUDE_DIR)
   message(STATUS "FAISS_ROOT=${FAISS_ROOT}")
+  message(STATUS "FAISS_INCLUDE_DIR=${FAISS_INCLUDE_DIR}")
   message(STATUS "FAISS_LIB=${FAISS_LIB}")
 
   add_executable(nvdb_ivf_build apps/nvdb_ivf_build.cpp)
+  target_include_directories(nvdb_ivf_build PRIVATE "${FAISS_INCLUDE_DIR}")
   target_link_libraries(nvdb_ivf_build PRIVATE nvdb ${FAISS_LIB} openblas)
-  target_include_directories(nvdb_ivf_build PRIVATE "${FAISS_ROOT}/include")
 
   add_executable(nvdb_ivf_eval apps/nvdb_ivf_eval.cpp)
+  target_include_directories(nvdb_ivf_eval PRIVATE "${FAISS_INCLUDE_DIR}")
   target_link_libraries(nvdb_ivf_eval PRIVATE nvdb ${FAISS_LIB} openblas)
-  target_include_directories(nvdb_ivf_eval PRIVATE "${FAISS_ROOT}/include")
+
+  add_executable(nvdb_ivfpq_build apps/nvdb_ivfpq_build.cpp)
+  target_include_directories(nvdb_ivfpq_build PRIVATE "${FAISS_INCLUDE_DIR}")
+  target_link_libraries(nvdb_ivfpq_build PRIVATE nvdb ${FAISS_LIB} openblas)
+
 else()
-  message(WARNING "FAISS not found. IVF tools will not be built.")
+  message(WARNING "FAISS not found (FAISS_ROOT=${FAISS_ROOT}). IVF/IVFPQ tools will not be built.")
+endif()
+if (TARGET nvdb_ivf_eval)
+  target_link_libraries(nvdb_ivf_eval PRIVATE nvdb_cuda)
 endif()
 
-add_executable(nvdb_ivfpq_build apps/nvdb_ivfpq_build.cpp)
-target_link_libraries(nvdb_ivfpq_build PRIVATE nvdb ${FAISS_LIB} openblas)
-target_include_directories(nvdb_ivfpq_build PRIVATE "${FAISS_ROOT}/include")
-
+# ---- Ground truth builder should NOT depend on FAISS ----
 add_executable(nvdb_gt_build apps/nvdb_gt_build.cpp)
-target_link_libraries(nvdb_gt_build PRIVATE nvdb ${FAISS_LIB} openblas)
-target_include_directories(nvdb_gt_build PRIVATE "${FAISS_ROOT}/include")
+target_link_libraries(nvdb_gt_build PRIVATE nvdb)
+
+enable_language(CUDA)
+find_package(CUDAToolkit REQUIRED)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# RTX 3080 = sm_86
+set(CMAKE_CUDA_ARCHITECTURES 86)
+
+add_executable(nvdb_cuda_sanity apps/nvdb_cuda_sanity.cu)
+target_compile_options(nvdb_cuda_sanity PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+)
+
+
+
+add_library(nvdb_cuda STATIC src/cuda_refine.cu)
+target_include_directories(nvdb_cuda PUBLIC include)
+target_compile_options(nvdb_cuda PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+)
+# CMake CUDA provides cudart target
+target_link_libraries(nvdb_cuda PUBLIC CUDA::cudart)
+
