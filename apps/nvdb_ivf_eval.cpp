@@ -366,6 +366,10 @@ int main(int argc, char** argv) {
   double refine_ms_total = 0.0;
   double refine_ms_per_q = 0.0;
 
+  double refine_h2d_ms = 0.0;
+  double refine_kernel_ms = 0.0;
+  double refine_d2h_ms = 0.0;
+
   double recall_sum = 0.0;
   double select_ms_total = 0.0;
   double select_ms_per_q = 0.0;
@@ -449,29 +453,7 @@ int main(int argc, char** argv) {
             (uint32_t)Q, (uint32_t)refine_k,(uint32_t)k,
             tmp_ids, tmp_dist,&tmp_t);
         }
-        // ---- optional pinned host memory (page-locked) ----
-        const bool use_pinned = (getenv_int("CUDA_PINNED", 1) != 0); // default on
-        bool pinned_q = false, pinned_c = false;
-
-        if (use_pinned) {
-          // register host buffers (must have stable address; do this AFTER resize/fill)
-          cudaError_t e1 = cudaHostRegister(
-              queries_all.data(),
-              (size_t)Q * (size_t)d * sizeof(float),
-              cudaHostRegisterDefault);
-
-          if (e1 == cudaSuccess) pinned_q = true;
-          else std::cerr << "[WARN] cudaHostRegister(queries_all) failed: " << cudaGetErrorString(e1) << "\n";
-
-          cudaError_t e2 = cudaHostRegister(
-              cand_ids_all.data(),
-              (size_t)Q * (size_t)refine_k * sizeof(uint32_t),
-              cudaHostRegisterDefault);
-
-          if (e2 == cudaSuccess) pinned_c = true;
-          else std::cerr << "[WARN] cudaHostRegister(cand_ids_all) failed: " << cudaGetErrorString(e2) << "\n";
-        }
-
+        
         std::vector<uint32_t> topk_ids;
         std::vector<float> topk_dist;
         nvdb::CudaRefineTiming t{};
@@ -484,14 +466,20 @@ int main(int argc, char** argv) {
           &t
         );
 
-        refine_ms_total = t.total_ms;
-        refine_ms_per_q = refine_ms_total / double(Q);
+        refine_ms_total   = t.total_ms;
+        refine_ms_per_q   = refine_ms_total / double(Q);
+
+        refine_h2d_ms     = t.h2d_ms;
+        refine_kernel_ms  = t.kernel_ms;
+        refine_d2h_ms     = t.d2h_ms;
+
 
         std::cout << "CUDA_REFINE=1 refine_ms_total=" << t.total_ms
                   << " (h2d=" << t.h2d_ms
                   << " kernel=" << t.kernel_ms
                   << " d2h=" << t.d2h_ms << " ms)"
                   << " avg=" << (t.total_ms / double(Q)) << " ms/query\n";
+
 
         // recall
         recall_sum = 0.0;
@@ -512,11 +500,8 @@ int main(int argc, char** argv) {
           }
         }
 
-        // total_lat_ms = ann_lat_ms + refine_ms_per_q
         total_lat_ms.resize(ann_lat_ms.size());
         for (size_t i = 0; i < ann_lat_ms.size(); ++i) total_lat_ms[i] = ann_lat_ms[i] + refine_ms_per_q;
-        if (pinned_q) cuda_ck(cudaHostUnregister(queries_all.data()), "cudaHostUnregister queries_all");
-        if (pinned_c) cuda_ck(cudaHostUnregister(cand_ids_all.data()), "cudaHostUnregister cand_ids_all");
 
       }
 
@@ -546,6 +531,8 @@ int main(int argc, char** argv) {
         auto t_ref1 = std::chrono::steady_clock::now();
         refine_ms_total = ms_since(t_ref0, t_ref1);
         refine_ms_per_q = refine_ms_total / double(Q);
+
+
 
         std::cout << "CPU_REFINE staged refine_ms_total=" << refine_ms_total
                   << " (avg " << std::fixed << std::setprecision(3) << refine_ms_per_q << " ms/query)\n";
@@ -654,12 +641,21 @@ int main(int argc, char** argv) {
     << " k=" << k
     << " cuda_refine=" << (cuda_refine ? 1 : 0)
     << " refine_enabled=" << ((!ann_only && refine_k>0) ? 1 : 0)
+    << " refine_backend=" << ( (!ann_only && refine_k>0) ? (cuda_refine ? "cuda" : "cpu") : "none")
     << " ann_avg_ms=" << annS.avg_ms
     << " ann_p99_ms=" << annS.p99_ms
     << " total_avg_ms=" << totalS.avg_ms
     << " total_p99_ms=" << totalS.p99_ms
     << " refine_ms_total=" << refine_ms_total
     << " refine_ms_per_q=" << refine_ms_per_q
+    << " kernel_mode=" << getenv_str("CUDA_KERNEL_MODE","baseline")
+    << " cuda_pinned=" << getenv_int("CUDA_PINNED",0)
+    << " cuda_return_dist=" << getenv_int("CUDA_RETURN_DIST",1)
+    << " git_rev=" << getenv_str("GIT_SHA","NA")
+    << " refine_h2d_ms=" << refine_h2d_ms
+    << " refine_kernel_ms=" << refine_kernel_ms
+    << " refine_d2h_ms=" << refine_d2h_ms
+    << " refine_kernel_ms_per_q=" << (Q ? (refine_kernel_ms / double(Q)) : 0.0)
     << "\n";
 
   return 0;

@@ -7,9 +7,13 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>  
+#include <string>
+
+#ifndef NVDB_CUDA_KMAX
+#define NVDB_CUDA_KMAX 64
+#endif
 
 namespace nvdb {
-static const char* NVDB_CUDA_REFINE_BUILD_TAG = "warpmerge+half2+ILP+ids_only_v3";
 
 static void ck(cudaError_t e, const char* msg) {
   if (e != cudaSuccess) {
@@ -148,7 +152,9 @@ static void ensure_workspace(uint32_t Q, uint32_t D, uint32_t R, uint32_t K) {
   g_cap_Q = round_up(Q);
   g_cap_D = D;          // D fixed 384; keep exact
   g_cap_R = round_up(R);
-  g_cap_K = K;          // K small; keep exact
+  //g_cap_K = K;          // K small; keep exact
+  g_cap_K = std::max(g_cap_K, K);
+
 
   ck(cudaMalloc(&g_q_dev, (size_t)g_cap_Q * (size_t)g_cap_D * sizeof(float)), "cudaMalloc q(cache)");
   ck(cudaMalloc(&g_cand_dev, (size_t)g_cap_Q * (size_t)g_cap_R * sizeof(uint32_t)), "cudaMalloc cand(cache)");
@@ -206,19 +212,71 @@ __device__ __forceinline__ void topk_insert(float (&best_d)[KMAX], uint32_t (&be
 #endif
 
 template<int KMAX>
-__device__ __forceinline__ void topk_merge_list(
-    float (&best_d)[KMAX], uint32_t (&best_id)[KMAX],
-    const float* src_d, const uint32_t* src_id, int K)
+__device__ __forceinline__ void topk_unsorted_init(float (&d)[KMAX], uint32_t (&id)[KMAX]) {
+  #pragma unroll
+  for (int i = 0; i < KMAX; ++i) { d[i] = 1e30f; id[i] = 0xFFFFFFFFu; }
+}
+
+template<int KMAX>
+__device__ __forceinline__ void topk_unsorted_push(
+    float (&d)[KMAX], uint32_t (&id)[KMAX],
+    int& filled, int K, int& max_pos, float& max_val,
+    float dist, uint32_t vid)
+{
+  if (filled < K) {
+    d[filled]  = dist;
+    id[filled] = vid;
+    if (dist > max_val) { max_val = dist; max_pos = filled; }
+    filled++;
+    return;
+  }
+  if (dist >= max_val) return;
+
+  d[max_pos]  = dist;
+  id[max_pos] = vid;
+
+  max_val = d[0];
+  max_pos = 0;
+  #pragma unroll
+  for (int i = 1; i < KMAX; ++i) {
+    if (i >= K) break;
+    if (d[i] > max_val) { max_val = d[i]; max_pos = i; }
+  }
+}
+
+// merge one K-list from shared into an unsorted topK
+template<int KMAX>
+__device__ __forceinline__ void topk_unsorted_merge_from_shared(
+    float (&d)[KMAX], uint32_t (&id)[KMAX],
+    int& filled, int K, int& max_pos, float& max_val,
+    const float* src_d, const uint32_t* src_id)
 {
   #pragma unroll
   for (int i = 0; i < KMAX; ++i) {
     if (i >= K) break;
-    uint32_t id = src_id[i];
-    float dist  = src_d[i];
-    if (id == 0xFFFFFFFFu) continue;
-    topk_insert<KMAX>(best_d, best_id, dist, id, K);
+    uint32_t vid = src_id[i];
+    float dist   = src_d[i];
+    if (vid == 0xFFFFFFFFu) continue;
+    topk_unsorted_push<KMAX>(d, id, filled, K, max_pos, max_val, dist, vid);
   }
 }
+
+// sort K elements ascending by dist (tiny K, only used at the final output stage)
+template<int KMAX>
+__device__ __forceinline__ void topk_sort_small(float (&d)[KMAX], uint32_t (&id)[KMAX], int K) {
+  for (int i = 0; i < K; ++i) {
+    int best = i;
+    for (int j = i + 1; j < K; ++j) {
+      if (d[j] < d[best]) best = j;
+    }
+    if (best != i) {
+      float td = d[i]; d[i] = d[best]; d[best] = td;
+      uint32_t ti = id[i]; id[i] = id[best]; id[best] = ti;
+    }
+  }
+}
+
+
 
 
 /*__device__ __forceinline__ float l2_fp16_base(const __half* base, const float* qv, uint64_t id, uint32_t D) {
@@ -325,49 +383,70 @@ __global__ void l2_topk_fp16_kernel(
   float* s_dist = (float*)smem;
   uint32_t* s_id = (uint32_t*)(s_dist + (size_t)blockDim.x * (size_t)K);
 
-  // local topK in registers
+  // ---- per-thread unsorted topK ----
   float best_d[KMAX];
   uint32_t best_id[KMAX];
-  #pragma unroll
-  for (int i = 0; i < KMAX; ++i) { best_d[i] = 1e30f; best_id[i] = 0xFFFFFFFFu; }
+  topk_unsorted_init<KMAX>(best_d, best_id);
+
+  int filled = 0;
+  int max_pos = 0;
+  float max_val = -1.0f; // while filling, track current max
 
   const float* qv = queries + (uint64_t)q * D;
 
   for (uint32_t r = threadIdx.x; r < R; r += blockDim.x) {
     uint32_t id = cand[(uint64_t)q * R + r];
     if (id >= N) continue;
-    //float dist = l2_fp16_base(base, qv, (uint64_t)id, D);
+
     float dist = l2_fp16_base_half2(base, qv, (uint64_t)id, D);
-    topk_insert<KMAX>(best_d, best_id, dist, id, (int)K);
+    topk_unsorted_push<KMAX>(best_d, best_id, filled, (int)K, max_pos, max_val, dist, id);
   }
 
-  // write local topK to shared
-  for (uint32_t i = 0; i < K; ++i) {
-    const size_t off = (size_t)threadIdx.x * (size_t)K + i;
-    s_dist[off] = best_d[i];
-    s_id[off]   = best_id[i];
+  // write per-thread K items to shared
+  const size_t off = (size_t)threadIdx.x * (size_t)K;
+  #pragma unroll
+  for (int i = 0; i < KMAX; ++i) {
+    if (i >= (int)K) break;
+    s_dist[off + i] = best_d[i];
+    s_id[off + i]   = best_id[i];
   }
   __syncthreads();
 
+  // ---- thread0 merges (still ok) ----
   if (threadIdx.x == 0) {
-    // merge all local topKs
     float g_d[KMAX];
     uint32_t g_id[KMAX];
-    #pragma unroll
-    for (int i = 0; i < KMAX; ++i) { g_d[i] = 1e30f; g_id[i] = 0xFFFFFFFFu; }
+    topk_unsorted_init<KMAX>(g_d, g_id);
 
-    const uint32_t nT = blockDim.x;
-    for (uint32_t t = 0; t < nT; ++t) {
-      const size_t base_off = (size_t)t * (size_t)K;
-      for (uint32_t i = 0; i < K; ++i) {
-        float dist = s_dist[base_off + i];
-        uint32_t id = s_id[base_off + i];
+    int g_filled = 0;
+    int g_max_pos = 0;
+    float g_max_val = -1.0f;
+
+    for (uint32_t t = 0; t < (uint32_t)blockDim.x; ++t) {
+      const size_t toff = (size_t)t * (size_t)K;
+      #pragma unroll
+      for (int i = 0; i < KMAX; ++i) {
+        if (i >= (int)K) break;
+        uint32_t id = s_id[toff + i];
+        float dist  = s_dist[toff + i];
         if (id == 0xFFFFFFFFu) continue;
-        topk_insert<KMAX>(g_d, g_id, dist, id, (int)K);
+        topk_unsorted_push<KMAX>(g_d, g_id, g_filled, (int)K, g_max_pos, g_max_val, dist, id);
       }
     }
 
-    // output
+    // sort final K (K<=KMAX<=64, small)
+    // simple selection sort / partial sort in registers:
+    for (uint32_t i = 0; i < K; ++i) {
+      uint32_t best = i;
+      for (uint32_t j = i + 1; j < K; ++j) {
+        if (g_d[j] < g_d[best]) best = j;
+      }
+      if (best != i) {
+        float td = g_d[i]; g_d[i] = g_d[best]; g_d[best] = td;
+        uint32_t ti = g_id[i]; g_id[i] = g_id[best]; g_id[best] = ti;
+      }
+    }
+
     const size_t out_off = (size_t)q * (size_t)K;
     for (uint32_t i = 0; i < K; ++i) {
       out_ids[out_off + i]  = g_id[i];
@@ -375,6 +454,7 @@ __global__ void l2_topk_fp16_kernel(
     }
   }
 }
+
 //*/
 template<int KMAX>
 __global__ void l2_topk_fp16_kernel_warpmerge(
@@ -387,40 +467,43 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
   const uint32_t q = blockIdx.x;
   if (q >= Q) return;
 
-  const uint32_t tid  = threadIdx.x;
-  const uint32_t lane = tid & (NVDB_WARP_SIZE - 1);
-  const uint32_t warp = tid >> 5; // /32
+  const uint32_t tid   = threadIdx.x;
+  const uint32_t lane  = tid & 31u;
+  const uint32_t warp  = tid >> 5;               // /32
   const uint32_t nwarps = (blockDim.x + 31) >> 5;
 
   // Shared layout:
-  // 1) per-thread topK: [blockDim * K] dist + id
-  // 2) per-warp topK:   [nwarps * K] dist + id
+  // per-thread: [blockDim * K] dist + id
+  // per-warp:   [nwarps  * K] dist + id
   extern __shared__ unsigned char smem[];
-  float* s_dist_t = reinterpret_cast<float*>(smem);
-  uint32_t* s_id_t = reinterpret_cast<uint32_t*>(s_dist_t + (size_t)blockDim.x * (size_t)K);
+  float*    s_dist_t = reinterpret_cast<float*>(smem);
+  uint32_t* s_id_t   = reinterpret_cast<uint32_t*>(s_dist_t + (size_t)blockDim.x * (size_t)K);
 
-  float* s_dist_w = reinterpret_cast<float*>(s_id_t + (size_t)blockDim.x * (size_t)K);
-  uint32_t* s_id_w = reinterpret_cast<uint32_t*>(s_dist_w + (size_t)nwarps * (size_t)K);
+  float*    s_dist_w = reinterpret_cast<float*>(s_id_t + (size_t)blockDim.x * (size_t)K);
+  uint32_t* s_id_w   = reinterpret_cast<uint32_t*>(s_dist_w + (size_t)nwarps * (size_t)K);
 
-  // ---- local topK (register) ----
+  // -----------------------------
+  // Stage 1: per-thread topK (unsorted + maxslot)
+  // -----------------------------
   float best_d[KMAX];
   uint32_t best_id[KMAX];
-  #pragma unroll
-  for (int i = 0; i < KMAX; ++i) { best_d[i] = 1e30f; best_id[i] = 0xFFFFFFFFu; }
+  topk_unsorted_init<KMAX>(best_d, best_id);
+
+  int filled = 0;
+  int max_pos = 0;
+  float max_val = -1.0f;
 
   const float* qv = queries + (uint64_t)q * (uint64_t)D;
 
-  // scan candidates (striped by threads)
   for (uint32_t r = tid; r < R; r += blockDim.x) {
     uint32_t id = cand[(uint64_t)q * (uint64_t)R + r];
     if (id >= N) continue;
 
-
     float dist = l2_fp16_base_half2(base, qv, (uint64_t)id, D);
-    topk_insert<KMAX>(best_d, best_id, dist, id, (int)K);
+    topk_unsorted_push<KMAX>(best_d, best_id, filled, (int)K, max_pos, max_val, dist, id);
   }
 
-  // ---- write per-thread topK to shared ----
+  // write per-thread K items to shared (unsorted order ok)
   {
     const size_t base_off = (size_t)tid * (size_t)K;
     #pragma unroll
@@ -432,21 +515,30 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
   }
   __syncthreads();
 
-  // ---- warp leader merges 32 threads -> warp topK ----
+  // -----------------------------
+  // Stage 2: warp leader merges 32 threads -> warp topK (unsorted + maxslot)
+  // -----------------------------
   if (lane == 0) {
     float w_d[KMAX];
     uint32_t w_id[KMAX];
-    #pragma unroll
-    for (int i = 0; i < KMAX; ++i) { w_d[i] = 1e30f; w_id[i] = 0xFFFFFFFFu; }
+    topk_unsorted_init<KMAX>(w_d, w_id);
 
-    const uint32_t t0 = warp * NVDB_WARP_SIZE;
-    for (uint32_t t = 0; t < NVDB_WARP_SIZE; ++t) {
+    int w_filled = 0;
+    int w_max_pos = 0;
+    float w_max_val = -1.0f;
+
+    const uint32_t t0 = warp * 32u;
+    for (uint32_t t = 0; t < 32u; ++t) {
       const uint32_t th = t0 + t;
-      if (th >= blockDim.x) break;
+      if (th >= (uint32_t)blockDim.x) break;
       const size_t off = (size_t)th * (size_t)K;
-      topk_merge_list<KMAX>(w_d, w_id, &s_dist_t[off], &s_id_t[off], (int)K);
+      topk_unsorted_merge_from_shared<KMAX>(
+        w_d, w_id, w_filled, (int)K, w_max_pos, w_max_val,
+        &s_dist_t[off], &s_id_t[off]
+      );
     }
 
+    // store warp topK to shared
     const size_t woff = (size_t)warp * (size_t)K;
     #pragma unroll
     for (int i = 0; i < KMAX; ++i) {
@@ -457,17 +549,28 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
   }
   __syncthreads();
 
-  // ---- thread0 merges nwarps lists -> global topK ----
+  // -----------------------------
+  // Stage 3: thread0 merges nwarps lists -> global topK, then sort once
+  // -----------------------------
   if (tid == 0) {
     float g_d[KMAX];
     uint32_t g_id[KMAX];
-    #pragma unroll
-    for (int i = 0; i < KMAX; ++i) { g_d[i] = 1e30f; g_id[i] = 0xFFFFFFFFu; }
+    topk_unsorted_init<KMAX>(g_d, g_id);
+
+    int g_filled = 0;
+    int g_max_pos = 0;
+    float g_max_val = -1.0f;
 
     for (uint32_t w = 0; w < nwarps; ++w) {
       const size_t woff = (size_t)w * (size_t)K;
-      topk_merge_list<KMAX>(g_d, g_id, &s_dist_w[woff], &s_id_w[woff], (int)K);
+      topk_unsorted_merge_from_shared<KMAX>(
+        g_d, g_id, g_filled, (int)K, g_max_pos, g_max_val,
+        &s_dist_w[woff], &s_id_w[woff]
+      );
     }
+
+    // final sort (K small)
+    topk_sort_small<KMAX>(g_d, g_id, (int)K);
 
     const size_t out_off = (size_t)q * (size_t)K;
     #pragma unroll
@@ -478,6 +581,7 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
     }
   }
 }
+
 
 template<int KMAX>
 __global__ void l2_topk_fp32_kernel(
@@ -559,17 +663,22 @@ void cuda_l2_topk_batch(
     if (timing) *timing = {};
     return;
   }
-  if (K > 10) {
-    std::fprintf(stderr, "cuda_l2_topk_batch: K>%u not supported in this MVP (K<=10)\n", K);
+  if (K > NVDB_CUDA_KMAX) {
+    std::fprintf(stderr,
+      "cuda_l2_topk_batch: K=%u not supported (K<=%d)\n", K, NVDB_CUDA_KMAX);
     std::exit(3);
   }
-  static bool printed = false;
-  if (!printed) { printed = true; std::fprintf(stderr, "[cuda_refine] %s\n", NVDB_CUDA_REFINE_BUILD_TAG); }
+
+
 
   const int pinned = std::getenv("CUDA_PINNED") ? std::atoi(std::getenv("CUDA_PINNED")) : 0;
   const int return_dist_env = std::getenv("CUDA_RETURN_DIST") ? std::atoi(std::getenv("CUDA_RETURN_DIST")) : 1;
   const bool use_pinned = (pinned != 0);
   const bool want_dist = (return_dist_env != 0);
+
+  const char* km = std::getenv("CUDA_KERNEL_MODE");
+  const bool use_warpmerge = (km && std::string(km) == "warpmerge"); // default baseline
+
 
     ensure_base_on_gpu(base_ptr, base_dtype, N, D);
     ensure_workspace(Q, D, R, K);
@@ -616,33 +725,92 @@ void cuda_l2_topk_batch(
 
     ck(cudaEventRecord(ev1, g_stream), "event record 1");
 
-    // threads selection (keep your logic; fix max() -> std::max not needed)
+    // threads selection (initial)
     int threads = 256;
     if (R < 256) threads = 128;
     if (R < 128) threads = 64;
     if (R < 64)  threads = 32;
     if (threads < 32) threads = 32;
 
+    // Get device shmem limit (default 48KB on many GPUs)
+    cudaDeviceProp prop{};
+    ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
+    const size_t SHMAX = (size_t)prop.sharedMemPerBlock;
+
+    // helper to compute shmem for a given threads
+    auto shmem_for = [&](int th)->size_t {
+      const uint32_t nwarps = (uint32_t)((th + 31) / 32);
+      const size_t shmem_base =
+          (size_t)th * (size_t)K * (sizeof(float) + sizeof(uint32_t));
+      const size_t shmem_warpmerge =
+          shmem_base + (size_t)nwarps * (size_t)K * (sizeof(float) + sizeof(uint32_t));
+      return use_warpmerge ? shmem_warpmerge : shmem_base;
+    };
+
+    // clamp threads down until shmem fits
+    size_t shmem_bytes = shmem_for(threads);
+    while (threads > 32 && shmem_bytes > SHMAX) {
+      threads >>= 1;                 // 256->128->64->32
+      shmem_bytes = shmem_for(threads);
+    }
+
+    // final safety check
+    if (shmem_bytes > SHMAX) {
+      std::fprintf(stderr,
+                  "[cuda] shmem too large even at threads=%d (K=%u R=%u use_warpmerge=%d): "
+                  "need=%zuB > limit=%zuB\n",
+                  threads, (unsigned)K, (unsigned)R, (int)use_warpmerge,
+                  shmem_bytes, SHMAX);
+      std::exit(3);
+    }
+
     const dim3 grid(Q, 1, 1);
     const dim3 block(threads, 1, 1);
-    //const size_t shmem_bytes = (size_t)threads * (size_t)K * (sizeof(float) + sizeof(uint32_t));
-    const uint32_t nwarps = (threads + 31) / 32;
-    const size_t shmem_bytes =
-        (size_t)threads * (size_t)K * (sizeof(float) + sizeof(uint32_t)) +
-        (size_t)nwarps  * (size_t)K * (sizeof(float) + sizeof(uint32_t));
+
+
 
     if (base_dtype == 2) {
-      l2_topk_fp16_kernel<10><<<grid, block, shmem_bytes, g_stream>>>(
-        (const __half*)g_base_dev, N, D, g_q_dev, Q, g_cand_dev, R, K, g_out_id_dev, g_out_dist_dev
-      );
-      /*l2_topk_fp16_kernel_warpmerge<10><<<grid, block, shmem_bytes, g_stream>>>(
-        (const __half*)g_base_dev, N, D, g_q_dev, Q, g_cand_dev, R, K, g_out_id_dev, g_out_dist_dev
-      );*/
+      if (!use_warpmerge) {
+        l2_topk_fp16_kernel<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
+          (const __half*)g_base_dev, N, D,
+          g_q_dev, Q,
+          g_cand_dev, R,
+          K,
+          g_out_id_dev, g_out_dist_dev
+        );
+      } else {
+        l2_topk_fp16_kernel_warpmerge<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
+          (const __half*)g_base_dev, N, D,
+          g_q_dev, Q,
+          g_cand_dev, R,
+          K,
+          g_out_id_dev, g_out_dist_dev
+        );
+      }
     } else {
-      l2_topk_fp32_kernel<10><<<grid, block, shmem_bytes, g_stream>>>(
-        (const float*)g_base_dev, N, D, g_q_dev, Q, g_cand_dev, R, K, g_out_id_dev, g_out_dist_dev
+      l2_topk_fp32_kernel<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
+        (const float*)g_base_dev, N, D,
+        g_q_dev, Q,
+        g_cand_dev, R,
+        K,
+        g_out_id_dev, g_out_dist_dev
       );
     }
+
+  static bool once=true;
+  if (once) {
+    once=false;
+    cudaDeviceProp prop{};
+    ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
+    std::fprintf(stderr,
+      "[cuda_launch_dbg] K=%u R=%u Q=%u threads=%d shmem=%zu bytes "
+      "sharedMemPerBlock=%zu sharedMemOptin=%zu\n",
+      K, R, Q, threads, shmem_bytes,
+      (size_t)prop.sharedMemPerBlock,
+      (size_t)prop.sharedMemPerBlockOptin
+    );
+  }
+
     ck(cudaGetLastError(), "kernel launch");
     ck(cudaEventRecord(ev2, g_stream), "event record 2");
 

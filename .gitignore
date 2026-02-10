@@ -27,6 +27,8 @@ results*/
 scripts/export_vecbin.py
 scripts/compare_vecbin_values.py
 scripts/verify_vecbin_format.py
+scripts/analyze_results.py
+scripts/analyze_results2.py
 remote_setup.md
 result.md
 To_do.md
