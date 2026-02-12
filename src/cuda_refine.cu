@@ -732,10 +732,23 @@ void cuda_l2_topk_batch(
     if (R < 64)  threads = 32;
     if (threads < 32) threads = 32;
 
+    // ---- force threads (C experiment) ----
+    // CUDA_BLOCK_THREADS=0 (auto) | 128 | 256
+    int forced = 0;
+    if (const char* s = std::getenv("CUDA_BLOCK_THREADS")) forced = std::atoi(s);
+    if (forced == 128 || forced == 256) {
+      threads = forced;
+    }
+
+
     // Get device shmem limit (default 48KB on many GPUs)
     cudaDeviceProp prop{};
     ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
-    const size_t SHMAX = (size_t)prop.sharedMemPerBlock;
+    //const size_t SHMAX = (size_t)prop.sharedMemPerBlock;
+    const bool shmem_optin = (std::getenv("CUDA_SHMEM_OPTIN") && std::atoi(std::getenv("CUDA_SHMEM_OPTIN")) != 0);
+    // SHMAX: either default 48KB or opt-in limit (~99KB on 3080)
+    const size_t SHMAX = shmem_optin ? (size_t)prop.sharedMemPerBlockOptin
+                                    : (size_t)prop.sharedMemPerBlock;
 
     // helper to compute shmem for a given threads
     auto shmem_for = [&](int th)->size_t {
@@ -747,6 +760,7 @@ void cuda_l2_topk_batch(
       return use_warpmerge ? shmem_warpmerge : shmem_base;
     };
 
+    int threads_req = threads;
     // clamp threads down until shmem fits
     size_t shmem_bytes = shmem_for(threads);
     while (threads > 32 && shmem_bytes > SHMAX) {
@@ -754,18 +768,58 @@ void cuda_l2_topk_batch(
       shmem_bytes = shmem_for(threads);
     }
 
-    // final safety check
     if (shmem_bytes > SHMAX) {
-      std::fprintf(stderr,
-                  "[cuda] shmem too large even at threads=%d (K=%u R=%u use_warpmerge=%d): "
-                  "need=%zuB > limit=%zuB\n",
-                  threads, (unsigned)K, (unsigned)R, (int)use_warpmerge,
-                  shmem_bytes, SHMAX);
-      std::exit(3);
-    }
+    std::fprintf(stderr,
+      "[cuda_launch_dbg] FAIL K=%u R=%u Q=%u mode=%s threads=%d(req=%d) shmem=%zuB "
+      "limit=%zuB (default=%zuB optin=%zuB optin_on=%d)\n",
+      K, R, Q, (use_warpmerge ? "warpmerge" : "baseline"),
+      threads, threads_req, shmem_bytes,
+      SHMAX,
+      (size_t)prop.sharedMemPerBlock,
+      (size_t)prop.sharedMemPerBlockOptin,
+      (int)shmem_optin
+    );
+    std::exit(3);
+  }
+
 
     const dim3 grid(Q, 1, 1);
     const dim3 block(threads, 1, 1);
+    
+    const uint32_t nwarps = (uint32_t)((threads + 31) / 32);
+
+    if (timing) {
+      timing->threads = (uint32_t)threads;
+      timing->nwarps = nwarps;
+      timing->K = K;
+      timing->R = R;
+      timing->shmem_bytes = shmem_bytes;
+    }
+    // If opt-in enabled, allow larger dynamic shared memory for this kernel launch.
+    if (shmem_optin) {
+      // Note: must set attribute on the exact kernel symbol being launched.
+      if (base_dtype == 2) {
+        if (!use_warpmerge) {
+          ck(cudaFuncSetAttribute(
+                l2_topk_fp16_kernel<NVDB_CUDA_KMAX>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                (int)shmem_bytes),
+            "set max dynamic shmem (fp16 baseline)");
+        } else {
+          ck(cudaFuncSetAttribute(
+                l2_topk_fp16_kernel_warpmerge<NVDB_CUDA_KMAX>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                (int)shmem_bytes),
+            "set max dynamic shmem (fp16 warpmerge)");
+        }
+      } else {
+        ck(cudaFuncSetAttribute(
+              l2_topk_fp32_kernel<NVDB_CUDA_KMAX>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize,
+              (int)shmem_bytes),
+          "set max dynamic shmem (fp32)");
+      }
+    }
 
 
 
@@ -797,19 +851,21 @@ void cuda_l2_topk_batch(
       );
     }
 
-  static bool once=true;
-  if (once) {
-    once=false;
-    cudaDeviceProp prop{};
-    ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
-    std::fprintf(stderr,
-      "[cuda_launch_dbg] K=%u R=%u Q=%u threads=%d shmem=%zu bytes "
-      "sharedMemPerBlock=%zu sharedMemOptin=%zu\n",
-      K, R, Q, threads, shmem_bytes,
-      (size_t)prop.sharedMemPerBlock,
-      (size_t)prop.sharedMemPerBlockOptin
-    );
-  }
+    static bool once=true;
+    if (once) {
+      once=false;
+      std::fprintf(stderr,
+        "[cuda_launch_dbg] OK  K=%u R=%u Q=%u mode=%s threads=%d(req=%d) shmem=%zuB "
+        "limit=%zuB (default=%zuB optin=%zuB optin_on=%d)\n",
+        K, R, Q, (use_warpmerge ? "warpmerge" : "baseline"),
+        threads, threads_req, shmem_bytes,
+        SHMAX,
+        (size_t)prop.sharedMemPerBlock,
+        (size_t)prop.sharedMemPerBlockOptin,
+        (int)shmem_optin
+      );
+    }
+
 
     ck(cudaGetLastError(), "kernel launch");
     ck(cudaEventRecord(ev2, g_stream), "event record 2");

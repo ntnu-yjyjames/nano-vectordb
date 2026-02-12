@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> cand_ids_all;       // Q * refine_k (for CUDA refine)
 
   I_all.resize((size_t)Q * (size_t)k_search);
-
+  nvdb::CudaRefineTiming t{};
   if (staged) {
     // -------------------------
     // Stage A: ANN only (collect candidates + per-query ANN latency)
@@ -456,7 +456,7 @@ int main(int argc, char** argv) {
         
         std::vector<uint32_t> topk_ids;
         std::vector<float> topk_dist;
-        nvdb::CudaRefineTiming t{};
+        //nvdb::CudaRefineTiming t{};
         nvdb::cuda_l2_topk_batch(
           base_ptr, base.dtype(), base.count(), base.dim(),
           queries_all.data(), cand_ids_all.data(),
@@ -656,6 +656,10 @@ int main(int argc, char** argv) {
     << " refine_kernel_ms=" << refine_kernel_ms
     << " refine_d2h_ms=" << refine_d2h_ms
     << " refine_kernel_ms_per_q=" << (Q ? (refine_kernel_ms / double(Q)) : 0.0)
+    << " cuda_threads=" << (uint32_t)t.threads
+    << " cuda_nwarps=" << (uint32_t)t.nwarps
+    << " cuda_shmem_bytes=" << (uint64_t)t.shmem_bytes
+    << " cuda_forced_threads=" << getenv_int("CUDA_BLOCK_THREADS", 0)
     << "\n";
 
   return 0;

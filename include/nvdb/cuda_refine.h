@@ -5,11 +5,14 @@
 namespace nvdb {
 
 struct CudaRefineTiming {
-  double h2d_ms   = 0;
-  double kernel_ms= 0;
-  double d2h_ms   = 0;
-  double total_ms = 0;
+  float h2d_ms=0, kernel_ms=0, d2h_ms=0, total_ms=0;
+  uint32_t threads=0;
+  uint32_t nwarps=0;
+  uint32_t K=0;
+  uint32_t R=0;
+  size_t shmem_bytes=0;
 };
+
 
 void cuda_l2_topk_batch(
   const void* base_ptr,
