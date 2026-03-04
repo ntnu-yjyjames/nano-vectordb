@@ -23,6 +23,7 @@ arxiv_data/
 *.jsonl
 *.csv
 results*/
+ncu_results/
 *.log
 scripts/export_vecbin.py
 scripts/compare_vecbin_values.py
@@ -36,3 +37,8 @@ To_do.md
 hnsw_index/
 gt/
 ivf_index
+temp.py
+environment_backup.txt
+run_ncu_*
+dump_matrix.py
+matrix_dump.tsv

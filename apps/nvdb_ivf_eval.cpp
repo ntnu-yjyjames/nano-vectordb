@@ -601,11 +601,12 @@ int main(int argc, char** argv) {
 
 
   
+  if (!cuda_refine){
+    t.threads=0;
+    t.nwarps=0;
+    t.shmem_bytes=0;
+  }
 
-  // Stats
-
- 
- std::cout << std::fixed << std::setprecision(3);
   // ---- stats (machine-readable) ----
   LatStats annS   = compute_lat_stats(ann_lat_ms);
   LatStats totalS = compute_lat_stats(total_lat_ms);
@@ -630,37 +631,56 @@ int main(int argc, char** argv) {
   std::cout << "TOTAL p99:   " << totalS.p99_ms << " ms\n";
 
   // ---- single-line RESULT for CSV parsing ----
-  // (assumes you already have: refine_ms_total, refine_ms_per_q, cuda_refine, refine_k, k_search, nprobe, Q, k)
+  std::cout.setf(std::ios::fixed);
+  std::cout << std::setprecision(6);
 
-  std::cout << std::fixed << std::setprecision(6)
-    << "RESULT"
-    << " refine_k=" << refine_k
-    << " k_search=" << k_search
-    << " nprobe=" << nprobe
-    << " Q=" << Q
-    << " k=" << k
-    << " cuda_refine=" << (cuda_refine ? 1 : 0)
-    << " refine_enabled=" << ((!ann_only && refine_k>0) ? 1 : 0)
-    << " refine_backend=" << ( (!ann_only && refine_k>0) ? (cuda_refine ? "cuda" : "cpu") : "none")
-    << " ann_avg_ms=" << annS.avg_ms
-    << " ann_p99_ms=" << annS.p99_ms
-    << " total_avg_ms=" << totalS.avg_ms
-    << " total_p99_ms=" << totalS.p99_ms
-    << " refine_ms_total=" << refine_ms_total
-    << " refine_ms_per_q=" << refine_ms_per_q
-    << " kernel_mode=" << getenv_str("CUDA_KERNEL_MODE","baseline")
-    << " cuda_pinned=" << getenv_int("CUDA_PINNED",0)
-    << " cuda_return_dist=" << getenv_int("CUDA_RETURN_DIST",1)
-    << " git_rev=" << getenv_str("GIT_SHA","NA")
-    << " refine_h2d_ms=" << refine_h2d_ms
-    << " refine_kernel_ms=" << refine_kernel_ms
-    << " refine_d2h_ms=" << refine_d2h_ms
-    << " refine_kernel_ms_per_q=" << (Q ? (refine_kernel_ms / double(Q)) : 0.0)
-    << " cuda_threads=" << (uint32_t)t.threads
-    << " cuda_nwarps=" << (uint32_t)t.nwarps
-    << " cuda_shmem_bytes=" << (uint64_t)t.shmem_bytes
-    << " cuda_forced_threads=" << getenv_int("CUDA_BLOCK_THREADS", 0)
-    << "\n";
+  auto kvi = [&](const char* key, long long v) {
+    std::cout << " " << key << "=" << v;
+  };
+  auto kvd = [&](const char* key, double v) {
+    std::cout << " " << key << "=" << v;
+  };
+  auto kvs = [&](const char* key, const std::string& v) {
+    std::cout << " " << key << "=" << v;
+  };
+
+  std::cout << "RESULT";
+
+  kvi("refine_k", refine_k);
+  kvi("k_search", k_search);
+  kvi("nprobe", nprobe);
+  kvi("Q", (long long)Q);
+  kvi("k", (long long)k);
+
+  kvi("cuda_refine", cuda_refine ? 1 : 0);
+  kvi("refine_enabled", (!ann_only && refine_k > 0) ? 1 : 0);
+  kvs("refine_backend", ((!ann_only && refine_k > 0) ? (cuda_refine ? "cuda" : "cpu") : "none"));
+
+  kvd("ann_avg_ms", annS.avg_ms);
+  kvd("ann_p99_ms", annS.p99_ms);
+  kvd("total_avg_ms", totalS.avg_ms);
+  kvd("total_p99_ms", totalS.p99_ms);
+
+  kvd("refine_ms_total", refine_ms_total);
+  kvd("refine_ms_per_q", refine_ms_per_q);
+
+  kvs("kernel_mode", getenv_str("CUDA_KERNEL_MODE", "baseline"));
+  kvi("cuda_pinned", getenv_int("CUDA_PINNED", 0));
+  kvi("cuda_return_dist", getenv_int("CUDA_RETURN_DIST", 1));
+  kvs("git_rev", getenv_str("GIT_SHA", "NA"));
+
+  kvd("refine_h2d_ms", refine_h2d_ms);
+  kvd("refine_kernel_ms", refine_kernel_ms);
+  kvd("refine_d2h_ms", refine_d2h_ms);
+  kvd("refine_kernel_ms_per_q", (Q ? (refine_kernel_ms / double(Q)) : 0.0));
+
+  kvi("cuda_threads", (long long)t.threads);
+  kvi("cuda_nwarps", (long long)t.nwarps);
+  kvi("cuda_shmem_bytes", (long long)t.shmem_bytes);
+  kvi("cuda_forced_threads", (long long)getenv_int("CUDA_BLOCK_THREADS", 0));
+  kvi("cuda_shmem_optin", (long long)getenv_int("CUDA_SHMEM_OPTIN", 0));
+
+  std::cout << "\n";
 
   return 0;
 }

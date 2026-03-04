@@ -133,7 +133,7 @@ We report `paired mean differences` (warpmerge − baseline) with **95% CI** ove
 ### CU5-A — Kernel-only Δ vs K (primary evidence)
 <picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU5_A_Kernel_Dark.png"> <img alt="CU5 kernel-only paired delta vs K (threads=128/256, Q=10000, R=500)" src="performance_images/CU5_A_Kernel_Light.png"> </picture>
 
-**Figure CU5-A.** Paired Δ on **kernel-only** time (`refine_kernel_ms_per_q`) vs `k`, comparing forced `CUDA_BLOCK_THREADS=128` vs `256` (Q=10000, R=500). This isolates compute/merge behavior from H2D/D2H transfer variability.
+**Figure CU5-A.** Paired Δ on **kernel-only** time (**Δkernel = warpmerge − baseline**, measured by `refine_kernel_ms_per_q`) vs `k`, comparing forced `CUDA_BLOCK_THREADS=128` vs `256` (Q=10000, R=500). This isolates compute/merge behavior from H2D/D2H transfer variability.
 
 |     Q | Threads |  K | Metric      | meanDiff (ms/query) | 95% CI (ms/query)      | Interpretation                      |
 | ----: | ------: | -: | ----------- | ------------------: | ---------------------- | ----------------------------------- |
@@ -146,11 +146,18 @@ We report `paired mean differences` (warpmerge − baseline) with **95% CI** ove
 
 **Table CU5-1.** Kernel-only summary (paired Δ, Q=10000, nPairs=30)
 
-**Interpretation.** The improvement peaks at **K=20 with Threads=256**, where warp-merge reduces kernel time by **~1.04 μs/query**. In contrast, at **Threads=128**, warp-merge is slower for K=10/20 and only becomes beneficial at K=30. This supports a thread/parallelism interaction: **warp-merge amortizes best when enough thread-level work exists to make the baseline’s block-level merge comparatively expensive, but not so large that additional shared-memory traffic dominates.**
+
+**Interpretation.** Warp-merge exhibits a clear (K, threads) interaction:
+
+* At **K=10**, warp-merge is slower at both thread settings, consistent with its fixed shared/synchronization overhead outweighing any merge benefit when `K` is small.
+* At **Threads=256**, warp-merge becomes strongly beneficial at **K=20** (≈ −1.04 μs/query) and remains beneficial at **K=30** (≈ −0.30 μs/query).
+* At **Threads=128**, warp-merge remains slightly slower at **K=20** and only becomes beneficial at **K=30**.
+
+This pattern supports the hypothesis that warp-merge helps primarily when the baseline’s **block-level merge/top-K maintenance** becomes expensive enough (higher K and/or higher per-block parallelism), but the benefit diminishes again once added shared-memory traffic and synchronization pressure dominate.
 
 ### CU5-B — Total refine Δ sanity check (incl. H2D + kernel + D2H)
 
-Kernel-only is the primary evidence (mechanism-level). For completeness, we also compute paired Δ on **total refine** time (`refine_ms_per_q`, includes H2D + kernel + D2H). As expected, effect sizes are typically **smaller** due to transfer components, but the **direction** generally matches the kernel-only results.
+**Figure CU5-B.** Paired Δ on **total refine** time (**Δtotal = warpmerge − baseline**, measured by `refine_ms_per_q`) vs k, under the same forced thread settings (Q=10000, R=500). Total refine includes **H2D + kernel + D2H**, so effect sizes are expected to be smaller than kernel-only.
 
 |     Q | Threads |  K | Metric       | meanDiff (ms/query) | 95% CI (ms/query)      | Interpretation   |
 | ----: | ------: | -: | ------------ | ------------------: | ---------------------- | ---------------- |
@@ -161,6 +168,102 @@ Kernel-only is the primary evidence (mechanism-level). For completeness, we also
 | 10000 |     256 | 20 | total refine |           −0.001043 | [−0.001069, −0.001016] | warpmerge faster |
 | 10000 |     256 | 30 | total refine |           −0.000275 | [−0.000308, −0.000242] | warpmerge faster |
 
-**Table CU5-2.**  Total refine Δ  summary (incl. H2D + kernel + D2H)
+**Table CU5-2.**  Total refine summary (paired Δtotal, Q=10000, nPairs=30).
 
-**Takeaway.** The strongest gain at **K=20** is not a transfer artifact: it appears in **kernel-only** and persists (though diluted) in **total refine**. The forced-thread experiments show that warp-merge’s advantage is conditional on **block parallelism**, consistent with a merge-cost vs occupancy/shared-memory tradeoff.
+**Takeaway.** CU5-B confirms that the **K=20 peak at Threads=256** is not a transfer artifact: the strongest improvement is present in **kernel-only** (CU5-A) and remains after adding H2D/D2H (CU5-B), although the absolute magnitude can be diluted by transfer components. Together, CU5-A and CU5-B show that warp-merge’s advantage is conditional on **block parallelism** and `K`, consistent with a **merge-cost vs shared-memory/synchronization overhead** tradeoff.
+
+
+## CU6 — NCU mechanism snapshot (why the K=20, threads=256 peak is largest)
+
+To ground the CU5 paired Δ results in micro-architectural evidence, we collect **Nsight Compute (NCU)** counters on representative points under the same workload (`Q=10000`, `R=500`, `nprobe=64`, `REFINE_K=500`, `CUDA_PINNED=0`, `CUDA_RETURN_DIST=0`). This section focuses on **kernel behavior** (merge + shared-memory effects), not end-to-end latency.
+
+### CU6.1 Performance deltas with opt-in context (kernel-only, warpmerge − baseline)
+
+We first restate the kernel-only Δ behavior under forced block sizes. Δ is defined as:
+
+* **Δkernel (µs/query) = warpmerge − baseline** on `refine_kernel_ms_per_q`
+* Negative means warp-merge is faster
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_PerfDelta_Threads128_Dark.png"> <img alt="Warp-merge performance delta vs K (Threads=128)" src="performance_images/CU6_PerfDelta_Threads128_Light.png"> </picture>
+
+**Figure CU6-1.** Kernel-only Δ vs K under `CUDA_BLOCK_THREADS=128`, split by `CUDA_SHMEM_OPTIN `(Optin=0: default 48KB/block; Optin=1: smem opt-in). Baseline and warp-merge runs use identical candidate sets and environment.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_PerfDelta_Threads256_Dark.png"> <img alt="Warp-merge performance delta vs K (Threads=256)" src="performance_images/CU6_PerfDelta_Threads256_Light.png"> </picture>
+
+**Figure CU6-2.** Kernel-only Δ vs K under `CUDA_BLOCK_THREADS=256`.
+**Note (important):** `K=30, Threads=256, Optin=1 `is an “opt-in only” configuration; without opt-in the implementation would clamp to fewer threads due to shared-memory limits. The large negative Δ at that point reflects a *different* launch configuration enabled by opt-in (not a measurement artifact), so we interpret it separately from the default 48KB regime.
+
+### CU6.2 Shared-memory traffic grows with K (warpmerge adds LD/ST wavefronts)
+
+Warp-merge’s design reads/writes shared memory in additional stages. We quantify that as the delta in shared-memory load wavefronts:
+
+* `ΔshLdWf = Δ smsp__sass_l1tex_data_pipe_lsu_wavefronts_mem_shared_op_ld.sum`
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_ShLdWf_Threads128_Dark.png"> <img alt="Δ shared LD wavefronts vs K (Threads=128)" src="performance_images/CU6_ShLdWf_Threads128_Light.png"> </picture>
+
+**Figure CU6-3.** `Threads=128`. Warp-merge consistently increases shared LD wavefronts, scaling with K (≈ +0.8M / +1.6M / +2.4M for K=10/20/30).
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_ShLdWf_Threads256_Dark.png"> <img alt="Δ shared LD wavefronts vs K (Threads=256)" src="performance_images/CU6_ShLdWf_Threads256_Light.png"> </picture>
+
+**Figure CU6-4.** `Threads=256`. The shared-memory pressure is larger (≈ +1.6M / +3.2M / +4.8M), consistent with more warps contributing to shared staging and merge.
+
+### CU6.3 Bank-conflict vs speed: “more conflicts” does not necessarily mean “slower”
+
+Bank conflicts on shared loads rise sharply for warp-merge, especially at higher K. We plot:
+
+* x-axis: `ΔBankLD = Δ l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`
+* y-axis: `ΔKernel (µs/query)` (kernel-only, warpmerge − baseline)
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_Scatter_BankLD_Kernel_Th128_Dark.png"> <img alt="ΔBankLD vs ΔKernel (Threads=128)" src="performance_images/CU6_Scatter_BankLD_Kernel_Th128_Light.png"> </picture>
+
+**Figure CU6-5.** `Threads=128`. Warp-merge increases bank conflicts for K=20/30, but the performance outcome depends on whether merge savings can amortize the added shared traffic.
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_Scatter_BankLD_Kernel_Th256_Dark.png"> <img alt="ΔBankLD vs ΔKernel (Threads=256)" src="performance_images/CU6_Scatter_BankLD_Kernel_Th256_Light.png"> </picture>
+
+**Figure CU6-6.** `Threads=256`. The “peak gain” case (K=20) occurs despite a very large increase in shared LD bank conflicts, implying the dominating benefit comes from reduced merge work, not reduced shared contention.
+
+### CU6.4 Stall mechanism snapshot (Threads=256, Optin=0)
+
+To make CU6 concrete, we show the stall deltas for Threads=256, Optin=0:
+* Barrier stall: `smsp__warp_issue_stalled_barrier_per_warp_active.pct`
+* Long scoreboard stall: `smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct`
+* Short scoreboard stall: `smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct`
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU6_Delta_Stall_Breakdown_Dark.png"> <img alt="Stall breakdown delta (warpmerge - baseline), threads=256 optin=0" src="performance_images/CU6_Delta_Stall_Breakdown_Light.png"> </picture>
+
+**Figure CU6-7.** Stall breakdown delta (warpmerge − baseline) at `Threads=256, Optin=0`.
+Interpretation: warp-merge tends to increase barrier and short-scoreboard stalls (extra synchronization / shared-memory interactions), while long-scoreboard behavior may shift depending on K. The performance outcome depends on whether merge-work reduction dominates these added stalls.
+
+### CU6.5 Representative counter deltas (warpmerge − baseline) at Threads=256
+
+We summarize two representative points at Threads=256 (Optin=0, default 48KB regime) using NCU counters (single-kernel invocation):
+
+* **Counterexample (slow):** `K=10, Threads=256, Optin=0`
+* **Peak-gain (fast):** `K=20, Threads=256, Optin=0`
+
+| Case (Q=10000, R=500)     | gpu__time_duration.sum (ms) | Barrier stall Δ (pp) | Short scoreboard stall Δ (pp) | Shared LD wavefronts Δ | Shared ST wavefronts Δ | Shared bank conflicts LD Δ | Branch uniformity Δ (pp) |
+| ------------------------- | --------------------------: | -------------------: | ----------------------------: | ---------------------: | ---------------------: | -------------------------: | -----------------------: |
+| **K=10, th=256, optin=0** |                 **+5.3836** |           **+5.334** |                    **+8.125** |              **+1.6M** |              **+1.6M** |                **+13,309** |               **−0.087** |
+| **K=20, th=256, optin=0** |                **−18.4749** |           **+1.989** |                    **+5.487** |              **+3.2M** |              **+3.2M** |               **+144,492** |               **−0.046** |
+
+
+**Table CU6-2.** Mechanism snapshot at `Threads=256 (Optin=0)`.
+Notes:
+(i) `gpu__time_duration.sum` is the kernel duration for the profiled launch (one invocation).
+(ii) Shared wavefronts use `smsp__sass_l1tex_data_pipe_lsu_wavefronts_mem_shared_op_{ld,st}.sum`.
+(iii) Branch uniformity uses `smsp__sass_average_branch_targets_threads_uniform.pct` (Δ shown in percentage points).
+
+### CU6.6 Interpretation: why K=20 at Threads=256 is the “sweet spot”
+
+1. **Warp-merge predictably increases shared-memory traffic and synchronization exposure.**
+Across all K, warp-merge increases shared LD/ST wavefronts (CU6.2) and often increases bank-conflict load events (CU6.3). It also tends to increase barrier/short-scoreboard stalls (CU6.4). These are the “cost terms” of warp-merge.
+
+2. **The K-dependent outcome is whether merge savings outweigh those shared/sync costs.**
+* At **K=10**, baseline’s merge is relatively cheap, so warp-merge’s extra staging and synchronization is not amortized; the kernel gets slower (CU6.5: `gpu__time_duration.sum` +5.38 ms).
+* At **K=20**, baseline’s merge work becomes expensive enough that warp-merge’s structure reduces effective merge work sufficiently to dominate the added shared costs, producing the largest observed speedup at `Threads=256` (CU6.5: `gpu__time_duration.sum` −18.47 ms and CU6.1/CU5: Δkernel ≈ −0.869 µs/query).
+* At **K=30**, warp-merge can still help, but shared-memory pressure continues to grow with K; the net effect becomes more sensitive to the exact launch configuration and shared-memory limits (see CU6.1 note on opt-in enabling 256 threads at high K).
+
+3. **Branch divergence is not the driver here.**
+Branch uniformity stays extremely high (~99.9%+) and deltas are tiny (≤0.1 pp). The dominant signals are shared traffic (wavefronts/bank conflicts) and synchronization/scoreboarding stalls.
+
+**Takeaway.** CU6 provides mechanism-level evidence supporting CU5’s headline: warp-merge wins most strongly when baseline merge work is large enough to amortize warp-merge’s added shared/synchronization overhead. In this workload, that “sweet spot” appears around **K=20** with **Threads=256** under the default shared-memory regime (Optin=0).
