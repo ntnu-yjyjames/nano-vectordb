@@ -60,6 +60,18 @@ static void free_workspace_cache() {
   if (g_stream) cudaStreamDestroy(g_stream), g_stream = nullptr;
 }
 
+// ---- debug timing cache (process-local) ----
+// store 3 uint64 per query: dist, write, merge
+static uint64_t* g_dbg_dev  = nullptr;
+static uint64_t* g_dbg_host = nullptr;
+static uint32_t  g_dbg_capQ = 0;
+
+static void free_dbg_cache() {
+  if (g_dbg_dev)  cudaFree(g_dbg_dev), g_dbg_dev = nullptr;
+  if (g_dbg_host) cudaFreeHost(g_dbg_host), g_dbg_host = nullptr;
+  g_dbg_capQ = 0;
+}
+
 // ---- host pinned cache (process-local) ----
 static float*    g_h_q_pinned        = nullptr; // Q*D
 static uint32_t* g_h_cand_pinned     = nullptr; // Q*R
@@ -124,6 +136,7 @@ static void ensure_stream() {
     std::atexit(free_workspace_cache);
     std::atexit(free_base_cache);
     std::atexit(free_host_pinned_cache);
+    std::atexit(free_dbg_cache);
   }
 }
 
@@ -188,6 +201,27 @@ static void ensure_base_on_gpu(const void* base_ptr, uint32_t base_dtype, uint64
   g_base_D = D;
   g_base_dt = base_dtype;
   g_base_bytes = need_bytes;
+}
+
+static void ensure_dbg(uint32_t dbg_q) {
+  if (dbg_q == 0) return;
+  ensure_stream();
+  if (dbg_q <= g_dbg_capQ && g_dbg_dev && g_dbg_host) return;
+
+  // grow (round up)
+  auto round_up = [](uint32_t x) {
+    uint32_t p = 1;
+    while (p < x) p <<= 1;
+    return p;
+  };
+  uint32_t cap = round_up(dbg_q);
+
+  if (g_dbg_dev)  cudaFree(g_dbg_dev), g_dbg_dev = nullptr;
+  if (g_dbg_host) cudaFreeHost(g_dbg_host), g_dbg_host = nullptr;
+
+  ck(cudaMalloc(&g_dbg_dev, (size_t)cap * 3 * sizeof(uint64_t)), "cudaMalloc dbg_dev");
+  ck(cudaHostAlloc((void**)&g_dbg_host, (size_t)cap * 3 * sizeof(uint64_t), cudaHostAllocDefault), "cudaHostAlloc dbg_host");
+  g_dbg_capQ = cap;
 }
 
 // ---- small helpers ----
@@ -374,10 +408,14 @@ __global__ void l2_topk_fp16_kernel(
     const float* queries, uint32_t Q,
     const uint32_t* cand, uint32_t R,
     uint32_t K,
-    uint32_t* out_ids, float* out_dist)
+    uint32_t* out_ids, float* out_dist,
+    uint64_t* dbg_out, uint32_t dbg_q)
 {
   const uint32_t q = blockIdx.x;
   if (q >= Q) return;
+  uint64_t t0=0, t1=0, t2=0, t3=0;
+  const bool do_dbg = (dbg_out != nullptr) && (q < dbg_q) && (threadIdx.x == 0);
+  if (do_dbg) t0 = clock64();
 
   extern __shared__ unsigned char smem[];
   float* s_dist = (float*)smem;
@@ -401,6 +439,7 @@ __global__ void l2_topk_fp16_kernel(
     float dist = l2_fp16_base_half2(base, qv, (uint64_t)id, D);
     topk_unsorted_push<KMAX>(best_d, best_id, filled, (int)K, max_pos, max_val, dist, id);
   }
+  if (do_dbg) t1 = clock64();
 
   // write per-thread K items to shared
   const size_t off = (size_t)threadIdx.x * (size_t)K;
@@ -411,6 +450,7 @@ __global__ void l2_topk_fp16_kernel(
     s_id[off + i]   = best_id[i];
   }
   __syncthreads();
+  if (do_dbg) t2 = clock64();
 
   // ---- thread0 merges (still ok) ----
   if (threadIdx.x == 0) {
@@ -452,6 +492,12 @@ __global__ void l2_topk_fp16_kernel(
       out_ids[out_off + i]  = g_id[i];
       out_dist[out_off + i] = g_d[i];
     }
+    if (do_dbg){
+      t3= clock64();
+      dbg_out[(size_t)q * 3 + 0] = t1-t0;
+      dbg_out[(size_t)q * 3 + 1] = t2-t1;
+      dbg_out[(size_t)q * 3 + 2] = t3-t2;
+    }
   }
 }
 
@@ -462,16 +508,20 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
     const float* queries, uint32_t Q,
     const uint32_t* cand, uint32_t R,
     uint32_t K,
-    uint32_t* out_ids, float* out_dist)
+    uint32_t* out_ids, float* out_dist,
+    uint64_t* dbg_out, uint32_t dbg_q)
 {
   const uint32_t q = blockIdx.x;
   if (q >= Q) return;
+
+  uint64_t t0=0, t1=0, t2=0, t3=0;
 
   const uint32_t tid   = threadIdx.x;
   const uint32_t lane  = tid & 31u;
   const uint32_t warp  = tid >> 5;               // /32
   const uint32_t nwarps = (blockDim.x + 31) >> 5;
-
+  const bool do_dbg = (dbg_out != nullptr) && (q < dbg_q) && (tid == 0);
+  if (do_dbg) t0 = clock64();
   // Shared layout:
   // per-thread: [blockDim * K] dist + id
   // per-warp:   [nwarps  * K] dist + id
@@ -502,6 +552,7 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
     float dist = l2_fp16_base_half2(base, qv, (uint64_t)id, D);
     topk_unsorted_push<KMAX>(best_d, best_id, filled, (int)K, max_pos, max_val, dist, id);
   }
+  if (do_dbg) t1 = clock64();
 
   // write per-thread K items to shared (unsorted order ok)
   {
@@ -514,6 +565,7 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
     }
   }
   __syncthreads();
+  if (do_dbg) t2 = clock64();
 
   // -----------------------------
   // Stage 2: warp leader merges 32 threads -> warp topK (unsorted + maxslot)
@@ -578,6 +630,12 @@ __global__ void l2_topk_fp16_kernel_warpmerge(
       if (i >= (int)K) break;
       out_ids[out_off + i]  = g_id[i];
       out_dist[out_off + i] = g_d[i];
+    }
+    if (do_dbg){
+      t3 = clock64();
+      dbg_out[(size_t)q * 3 +0] = t1-t0;
+      dbg_out[(size_t)q * 3 +1] = t2-t1;
+      dbg_out[(size_t)q * 3 +2] = t3-t2;
     }
   }
 }
@@ -668,7 +726,16 @@ void cuda_l2_topk_batch(
       "cuda_l2_topk_batch: K=%u not supported (K<=%d)\n", K, NVDB_CUDA_KMAX);
     std::exit(3);
   }
-
+  const int dbg_on = std::getenv("CUDA_DBG_TIMING") ? std::atoi(std::getenv("CUDA_DBG_TIMING")) : 0;
+  uint32_t dbg_q = 0;
+  if (dbg_on) {
+    dbg_q = std::getenv("CUDA_DBG_Q") ? (uint32_t)std::atoi(std::getenv("CUDA_DBG_Q")) : 32u;
+    if (dbg_q > Q) dbg_q = Q;
+    ensure_dbg(dbg_q);
+    // optional: clear dbg_dev (avoid stale)
+    ck(cudaMemsetAsync(g_dbg_dev, 0, (size_t)dbg_q * 3 * sizeof(uint64_t), g_stream), "memset dbg_dev");
+  }
+  uint64_t* dbg_dev = (dbg_on && dbg_q>0) ? g_dbg_dev : nullptr;
 
 
   const int pinned = std::getenv("CUDA_PINNED") ? std::atoi(std::getenv("CUDA_PINNED")) : 0;
@@ -830,7 +897,8 @@ void cuda_l2_topk_batch(
           g_q_dev, Q,
           g_cand_dev, R,
           K,
-          g_out_id_dev, g_out_dist_dev
+          g_out_id_dev, g_out_dist_dev,
+          dbg_dev,dbg_q
         );
       } else {
         l2_topk_fp16_kernel_warpmerge<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
@@ -838,7 +906,8 @@ void cuda_l2_topk_batch(
           g_q_dev, Q,
           g_cand_dev, R,
           K,
-          g_out_id_dev, g_out_dist_dev
+          g_out_id_dev, g_out_dist_dev,
+          dbg_dev,dbg_q
         );
       }
     } else {
@@ -880,6 +949,35 @@ void cuda_l2_topk_batch(
 
     ck(cudaEventRecord(ev3, g_stream), "event record 3");
     ck(cudaEventSynchronize(ev3), "event sync");
+    if (dbg_dev && dbg_q > 0 && timing) {
+    ck(cudaMemcpyAsync(g_dbg_host, dbg_dev, (size_t)dbg_q * 3 * sizeof(uint64_t),
+                      cudaMemcpyDeviceToHost, g_stream),
+      "D2H dbg");
+    ck(cudaStreamSynchronize(g_stream), "sync after D2H dbg");
+
+    // compute avg cycles
+    double sum_dist=0, sum_write=0, sum_merge=0;
+    for (uint32_t i=0; i<dbg_q; ++i) {
+      sum_dist  += (double)g_dbg_host[(size_t)i*3 + 0];
+      sum_write += (double)g_dbg_host[(size_t)i*3 + 1];
+      sum_merge += (double)g_dbg_host[(size_t)i*3 + 2];
+    }
+    const double inv = 1.0 / (double)dbg_q;
+
+    timing->dbg_q = dbg_q;
+    timing->dbg_dist_cycles_avg  = sum_dist  * inv;
+    timing->dbg_write_cycles_avg = sum_write * inv;
+    timing->dbg_merge_cycles_avg = sum_merge * inv;
+
+    const double tot = timing->dbg_dist_cycles_avg + timing->dbg_write_cycles_avg + timing->dbg_merge_cycles_avg;
+    if (tot > 0.0) {
+      timing->dbg_dist_pct  = timing->dbg_dist_cycles_avg  / tot;
+      timing->dbg_write_pct = timing->dbg_write_cycles_avg / tot;
+      timing->dbg_merge_pct = timing->dbg_merge_cycles_avg / tot;
+    } else {
+      timing->dbg_dist_pct = timing->dbg_write_pct = timing->dbg_merge_pct = 0.0;
+    }
+  }
 
     // timing
     float h2d_ms=0, kern_ms=0, d2h_ms=0;

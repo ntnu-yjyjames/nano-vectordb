@@ -236,16 +236,16 @@ Interpretation: warp-merge tends to increase barrier and short-scoreboard stalls
 
 ### CU6.5 Representative counter deltas (warpmerge − baseline) at Threads=256
 
-We summarize two representative points at Threads=256 (Optin=0, default 48KB regime) using NCU counters (single-kernel invocation):
+We summarize two representative points at **Threads=256, Optin=0 (default 48KB regime)** using **Nsight Compute (NCU)** counters (single-kernel invocation). These points illustrate the observed “counterexample vs peak-gain” behavior under the same workload (`Q=10000`, `R=500`, `nprobe=64`, `REFINE_K=500`, `CUDA_PINNED=0`, `CUDA_RETURN_DIST=0`):
 
-* **Counterexample (slow):** `K=10, Threads=256, Optin=0`
-* **Peak-gain (fast):** `K=20, Threads=256, Optin=0`
+* Counterexample (slow): K=10, Threads=256, Optin=0
+* Peak-gain (fast): K=20, Threads=256, Optin=0
+
 
 | Case (Q=10000, R=500)     | gpu__time_duration.sum (ms) | Barrier stall Δ (pp) | Short scoreboard stall Δ (pp) | Shared LD wavefronts Δ | Shared ST wavefronts Δ | Shared bank conflicts LD Δ | Branch uniformity Δ (pp) |
 | ------------------------- | --------------------------: | -------------------: | ----------------------------: | ---------------------: | ---------------------: | -------------------------: | -----------------------: |
 | **K=10, th=256, optin=0** |                 **+5.3836** |           **+5.334** |                    **+8.125** |              **+1.6M** |              **+1.6M** |                **+13,309** |               **−0.087** |
 | **K=20, th=256, optin=0** |                **−18.4749** |           **+1.989** |                    **+5.487** |              **+3.2M** |              **+3.2M** |               **+144,492** |               **−0.046** |
-
 
 **Table CU6-2.** Mechanism snapshot at `Threads=256 (Optin=0)`.
 Notes:
@@ -256,14 +256,31 @@ Notes:
 ### CU6.6 Interpretation: why K=20 at Threads=256 is the “sweet spot”
 
 1. **Warp-merge predictably increases shared-memory traffic and synchronization exposure.**
-Across all K, warp-merge increases shared LD/ST wavefronts (CU6.2) and often increases bank-conflict load events (CU6.3). It also tends to increase barrier/short-scoreboard stalls (CU6.4). These are the “cost terms” of warp-merge.
+Across K, warp-merge increases **shared LD/ST wavefronts** and often increases **shared bank-conflict** load events. It also tends to increase **barrier** and **short-scoreboard** stalls. These are the “cost terms” of warp-merge and are directly visible in CU6-2 (both K=10 and K=20 show higher barrier/short-scoreboard and higher shared traffic under warp-merge).
 
-2. **The K-dependent outcome is whether merge savings outweigh those shared/sync costs.**
-* At **K=10**, baseline’s merge is relatively cheap, so warp-merge’s extra staging and synchronization is not amortized; the kernel gets slower (CU6.5: `gpu__time_duration.sum` +5.38 ms).
-* At **K=20**, baseline’s merge work becomes expensive enough that warp-merge’s structure reduces effective merge work sufficiently to dominate the added shared costs, producing the largest observed speedup at `Threads=256` (CU6.5: `gpu__time_duration.sum` −18.47 ms and CU6.1/CU5: Δkernel ≈ −0.869 µs/query).
-* At **K=30**, warp-merge can still help, but shared-memory pressure continues to grow with K; the net effect becomes more sensitive to the exact launch configuration and shared-memory limits (see CU6.1 note on opt-in enabling 256 threads at high K).
+2. **The K-dependent outcome is whether merge savings outweigh those shared/sync costs (validated by in-kernel cycle breakdown).**
+Using lightweight `clock64` **instrumentation** (sampling `dbg_q=32`) we decompose the kernel work into three components: **distance loop**, **shared write/staging**, and **merge loop**. The results confirm that warp-merge’s speedups (or slowdowns) are governed primarily by **how much merge work it eliminates**:
+
+**Cycle breakdown (clock64, dbg_q=32):**
+| Case                                   | dist cycles avg | write cycles avg | merge cycles avg | Total (proxy) | Key Δ (warp − base)                |
+| -------------------------------------- | --------------: | ---------------: | ---------------: | ------------: | ---------------------------------- |
+| **K=10, th=256** baseline              |     614,415.500 |       17,444.969 |      876,440.062 | 1,508,300.531 | —                                  |
+| **K=10, th=256** warpmerge             |     619,314.000 |       17,274.031 |      777,114.375 | 1,413,702.406 | merge **−11.3%**, total **−6.3%**  |
+| **K=20, th=256** baseline              |     528,082.969 |       12,498.750 |      748,650.750 | 1,289,232.469 | —                                  |
+| **K=20, th=256** warpmerge             |     534,215.656 |       13,203.594 |      377,071.906 |   924,491.156 | merge **−49.6%**, total **−28.3%** |
+| **K=30, th=128** baseline *(clamped)*  |     711,538.719 |       17,001.500 |      599,046.188 | 1,327,586.407 | —                                  |
+| **K=30, th=128** warpmerge *(clamped)* |     720,587.531 |       19,067.250 |      431,579.719 | 1,171,234.500 | merge **−28.0%**, total **−11.8%** |
+
+
+**Table CU6-3.** `clock64` cycle decomposition (averaged over sampled queries). “Total (proxy)” is `dist + write + merge `cycles and is used for relative comparison.
+
+**Interpretation by K:**
+
+* At **K=10 (Threads=256),** warp-merge reduces merge cycles **only modestly (876k → 777k, −11.3%)** while distance cycles remain essentially unchanged (**+0.8%**) and the overall reduction in the cycle proxy is limited (**−6.3%**). In this regime, the merge is already “cheap enough” that warp-merge’s extra shared staging + synchronization exposure (CU6-2: higher barrier/short-scoreboard, increased shared traffic) is not well amortized. This matches the observed slow case in CU6-2 (`gpu__time_duration.sum` **+5.38 ms**).
+* At **K=20 (Threads=256)**, baseline merge becomes expensive enough that warp-merge achieves a **large merge-loop reduction (748.7k → 377.1k, −49.6%)** while distance and write cycles change only slightly. This produces the largest reduction in the cycle proxy (**−28.3%**) and aligns with the peak-gain case in CU6-2 (`gpu__time_duration.sum` **−18.47 ms**) and the kernel-only paired Δ in CU5 (largest speedup at `K=20, Threads=256`).
+* At **K=30**, warp-merge can still reduce merge cycles substantially (**−28.0%** in the clamped **Threads=128** regime), and the total cycle proxy still improves (**−11.8%**). However, higher K also increases shared-memory pressure, so the net effect becomes more sensitive to the exact launch configuration and shared-memory limits (e.g., clamp vs opt-in). This is consistent with CU5 showing that K=30 behavior is more configuration-dependent.
 
 3. **Branch divergence is not the driver here.**
-Branch uniformity stays extremely high (~99.9%+) and deltas are tiny (≤0.1 pp). The dominant signals are shared traffic (wavefronts/bank conflicts) and synchronization/scoreboarding stalls.
+Branch uniformity remains extremely high (~99.9%+) and the deltas are small (≤0.1 pp). The dominant explanatory signals are shared traffic (wavefronts/bank conflicts) and synchronization/scoreboarding stalls, together with the merge-loop work reduction quantified in Table CU6-3.
 
-**Takeaway.** CU6 provides mechanism-level evidence supporting CU5’s headline: warp-merge wins most strongly when baseline merge work is large enough to amortize warp-merge’s added shared/synchronization overhead. In this workload, that “sweet spot” appears around **K=20** with **Threads=256** under the default shared-memory regime (Optin=0).
+**Takeaway.** CU6 provides mechanism-level evidence supporting CU5’s headline: **warp-merge wins most strongly when baseline merge work is large enough to amortize warp-merge’s added shared/synchronization overhead.** In this workload, that “sweet spot” is** K=20 with Threads=256 under the default shared-memory regime (Optin=0)**, where warp-merge cuts the merge-loop work by **~50%** and yields the largest kernel-level improvement.

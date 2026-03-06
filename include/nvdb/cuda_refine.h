@@ -11,6 +11,14 @@ struct CudaRefineTiming {
   uint32_t K=0;
   uint32_t R=0;
   size_t shmem_bytes=0;
+  // debug timing (clock64 sample)
+  uint32_t dbg_q = 0;
+  double dbg_dist_cycles_avg = 0.0;
+  double dbg_write_cycles_avg = 0.0;
+  double dbg_merge_cycles_avg = 0.0;
+  double dbg_dist_pct = 0.0;
+  double dbg_write_pct = 0.0;
+  double dbg_merge_pct = 0.0;
 };
 
 

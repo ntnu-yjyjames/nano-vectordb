@@ -23,7 +23,8 @@
 #include <vector>
 #include <memory>
 #include <queue>
-
+#include <filesystem>
+#include <fstream>
 
 #include <cuda_runtime.h>
 
@@ -41,6 +42,87 @@ static int getenv_int(const char* k, int defv) {
 static std::string getenv_str(const char* k, const std::string& defv) {
   const char* v = std::getenv(k);
   return v ? std::string(v) : defv;
+}
+
+static void write_dbg_tsv_if_enabled(
+    const nvdb::CudaRefineTiming& t,
+    int k, uint64_t Q, uint32_t R, int nprobe,
+    int refine_k,
+    const std::string& kernel_mode,
+    int cuda_pinned,
+    int cuda_return_dist,
+    int cuda_shmem_optin,
+    const std::string& git_rev)
+{
+  const int dbg_on = getenv_int("CUDA_DBG_TIMING", 0);
+  if (!dbg_on) return;
+  if (t.dbg_q == 0) return; // no samples collected
+
+  // output dir
+  const std::string outdir = getenv_str("CUDA_DBG_DIR", "./results_dbg");
+  std::filesystem::create_directories(outdir);
+
+  // Compose file name (unique + grep-friendly)
+  // Example: dbg_K20_Q10000_R500_th256_mode=warpmerge_optin=0_pinned=0_ret=0_git=NA.tsv
+  const std::string fname =
+      "dbg_K" + std::to_string(k) +
+      "_Q" + std::to_string(Q) +
+      "_R" + std::to_string(R) +
+      "_th" + std::to_string((int)t.threads) +
+      "_mode=" + kernel_mode +
+      "_optin=" + std::to_string(cuda_shmem_optin) +
+      "_pinned=" + std::to_string(cuda_pinned) +
+      "_ret=" + std::to_string(cuda_return_dist) +
+      "_git=" + git_rev +
+      ".tsv";
+
+  const std::string path = outdir + "/" + fname;
+
+  // Write TSV (single-row, machine-readable)
+  // Units: cycles for *_cycles_avg, fraction for *_pct
+  std::ofstream ofs(path, std::ios::out | std::ios::trunc);
+  if (!ofs) {
+    std::cerr << "[WARN] cannot write DBG TSV: " << path << "\n";
+    return;
+  }
+
+  ofs << "k\tQ\tR\tnprobe\trefine_k\tkernel_mode\tcuda_threads\tcuda_nwarps\tcuda_shmem_bytes\tcuda_shmem_optin\t"
+         "cuda_pinned\tcuda_return_dist\tgit_rev\t"
+         "dbg_q\t"
+         "dbg_dist_cycles_avg\tdbg_write_cycles_avg\tdbg_merge_cycles_avg\t"
+         "dbg_dist_pct\tdbg_write_pct\tdbg_merge_pct\n";
+
+  ofs << k << "\t"
+      << Q << "\t"
+      << R << "\t"
+      << nprobe << "\t"
+      << refine_k << "\t"
+      << kernel_mode << "\t"
+      << t.threads << "\t"
+      << t.nwarps << "\t"
+      << t.shmem_bytes << "\t"
+      << cuda_shmem_optin << "\t"
+      << cuda_pinned << "\t"
+      << cuda_return_dist << "\t"
+      << git_rev << "\t"
+      << t.dbg_q << "\t"
+      << std::fixed << std::setprecision(3)
+      << t.dbg_dist_cycles_avg << "\t"
+      << t.dbg_write_cycles_avg << "\t"
+      << t.dbg_merge_cycles_avg << "\t"
+      << std::setprecision(6)
+      << t.dbg_dist_pct << "\t"
+      << t.dbg_write_pct << "\t"
+      << t.dbg_merge_pct << "\n";
+
+  ofs.close();
+
+  std::cout << "DBG_TSV=" << path
+            << " dbg_q=" << t.dbg_q
+            << " dist%=" << std::setprecision(3) << (t.dbg_dist_pct * 100.0)
+            << " write%=" << (t.dbg_write_pct * 100.0)
+            << " merge%=" << (t.dbg_merge_pct * 100.0)
+            << "\n";
 }
 
 static void cuda_ck(cudaError_t e, const char* msg) {
@@ -473,6 +555,19 @@ int main(int argc, char** argv) {
         refine_kernel_ms  = t.kernel_ms;
         refine_d2h_ms     = t.d2h_ms;
 
+        // ---- optional: write debug timing TSV (clock64 breakdown) ----
+        write_dbg_tsv_if_enabled(
+          t,
+          k, Q,
+          (uint32_t)refine_k,
+          nprobe,
+          refine_k,
+          getenv_str("CUDA_KERNEL_MODE","baseline"),
+          getenv_int("CUDA_PINNED",0),
+          getenv_int("CUDA_RETURN_DIST",1),
+          getenv_int("CUDA_SHMEM_OPTIN",0),
+          getenv_str("GIT_SHA","NA")
+        );
 
         std::cout << "CUDA_REFINE=1 refine_ms_total=" << t.total_ms
                   << " (h2d=" << t.h2d_ms
@@ -629,6 +724,7 @@ int main(int argc, char** argv) {
   std::cout << "TOTAL p50:   " << totalS.p50_ms << " ms\n";
   std::cout << "TOTAL p95:   " << totalS.p95_ms << " ms\n";
   std::cout << "TOTAL p99:   " << totalS.p99_ms << " ms\n";
+  std::cout  << " dbg_q=" << (uint32_t)t.dbg_q << " dbg_merge_pct=" << t.dbg_merge_pct << " dbg_write_pct=" << t.dbg_write_pct << " dbg_dist_pct=" << t.dbg_dist_pct ;
 
   // ---- single-line RESULT for CSV parsing ----
   std::cout.setf(std::ios::fixed);
