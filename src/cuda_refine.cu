@@ -701,7 +701,141 @@ __global__ void l2_topk_fp32_kernel(
     }
   }
 }
+template<int KMAX>
+__global__ void l2_topk_fp16_kernel_warpmerge_noshared(
+    const __half* base, uint64_t N, uint32_t D,
+    const float* queries, uint32_t Q,
+    const uint32_t* cand, uint32_t R,
+    uint32_t K,
+    uint32_t* out_ids, float* out_dist,
+    uint64_t* dbg_out, uint32_t dbg_q,
+    int sendM)
+{
+  const uint32_t q = blockIdx.x;
+  if (q >= Q) return;
 
+  const uint32_t tid  = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t warp = tid >> 5;
+  const uint32_t nwarps = (blockDim.x + 31) >> 5;
+  //const unsigned mask = 0xFFFFFFFFu;
+  //const unsigned mask = __activemask();
+
+  uint64_t t0=0, t1=0, t2=0, t3=0;
+  const bool do_dbg = (dbg_out != nullptr) && (q < dbg_q) && (tid == 0);
+  if (do_dbg) t0 = clock64();
+
+  // Shared layout: only per-warp topK
+  extern __shared__ unsigned char smem[];
+  float*    s_dist_w = reinterpret_cast<float*>(smem);
+  uint32_t* s_id_w   = reinterpret_cast<uint32_t*>(s_dist_w + (size_t)nwarps * (size_t)K);
+
+  // ---- per-thread topK in registers (unsorted + maxslot) ----
+  float best_d[KMAX];
+  uint32_t best_id[KMAX];
+  topk_unsorted_init<KMAX>(best_d, best_id);
+
+  int filled = 0;
+  int max_pos = 0;
+  float max_val = -1.0f;
+
+  const float* qv = queries + (uint64_t)q * (uint64_t)D;
+
+  for (uint32_t r = tid; r < R; r += blockDim.x) {
+    uint32_t id = cand[(uint64_t)q * (uint64_t)R + r];
+    if (id >= N) continue;
+    float dist = l2_fp16_base_half2(base, qv, (uint64_t)id, D);
+    topk_unsorted_push<KMAX>(best_d, best_id, filled, (int)K, max_pos, max_val, dist, id);
+  }
+
+  if (do_dbg) t1 = clock64();
+
+
+  // ---- warp merge: ALL lanes execute shfl, only lane0 updates w_d ----
+  const unsigned full_mask = 0xFFFFFFFFu;
+
+
+  float w_d[KMAX];
+  uint32_t w_id[KMAX];
+  int w_filled = 0;
+  int w_max_pos = 0;
+  float w_max_val = -1.0f;
+
+  if (lane == 0) {
+    topk_unsorted_init<KMAX>(w_d, w_id);
+  }
+
+  // Important: ALL lanes participate in shfl instructions
+  for (int src = 0; src < 32; ++src) {
+    #pragma unroll
+    for (int i = 0; i < KMAX; ++i) {
+      if (i >= sendM) break;   // <-- CUDA_WARP_SEND_M
+      float dist_i = __shfl_sync(full_mask, best_d[i], src);
+
+      // shuffle uint32 safely: use unsigned
+      unsigned id_u = __shfl_sync(full_mask, (unsigned)best_id[i], src);
+      uint32_t id_i = (uint32_t)id_u;
+
+      // only lane0 mutates the warp-topK buffer
+      if (lane == 0) {
+        if (id_i != 0xFFFFFFFFu) {
+          topk_unsorted_push<KMAX>(w_d, w_id, w_filled, (int)K, w_max_pos, w_max_val, dist_i, id_i);
+        }
+      }
+    }
+  }
+
+  // now lane0 writes warp list
+  if (lane == 0) {
+    const size_t woff = (size_t)warp * (size_t)K;
+    #pragma unroll
+    for (int i = 0; i < KMAX; ++i) {
+      if (i >= (int)K) break;
+      s_dist_w[woff + i] = w_d[i];
+      s_id_w[woff + i]   = w_id[i];
+    }
+  }
+
+  __syncthreads();
+
+  if (do_dbg) t2 = clock64();
+
+  // ---- thread0 merges nwarps lists -> global topK ----
+  if (tid == 0) {
+    float g_d[KMAX];
+    uint32_t g_id[KMAX];
+    topk_unsorted_init<KMAX>(g_d, g_id);
+
+    int g_filled = 0;
+    int g_max_pos = 0;
+    float g_max_val = -1.0f;
+
+    for (uint32_t w = 0; w < nwarps; ++w) {
+      const size_t woff = (size_t)w * (size_t)K;
+      topk_unsorted_merge_from_shared<KMAX>(
+        g_d, g_id, g_filled, (int)K, g_max_pos, g_max_val,
+        &s_dist_w[woff], &s_id_w[woff]
+      );
+    }
+
+    topk_sort_small<KMAX>(g_d, g_id, (int)K);
+
+    const size_t out_off = (size_t)q * (size_t)K;
+    #pragma unroll
+    for (int i = 0; i < KMAX; ++i) {
+      if (i >= (int)K) break;
+      out_ids[out_off + i]  = g_id[i];
+      out_dist[out_off + i] = g_d[i];
+    }
+
+    if (do_dbg) {
+      t3 = clock64();
+      dbg_out[(size_t)q * 3 + 0] = t1 - t0; // dist loop
+      dbg_out[(size_t)q * 3 + 1] = t2 - t1; // warpmerge stage (includes shfl merge + write warp list)
+      dbg_out[(size_t)q * 3 + 2] = t3 - t2; // final block merge + sort + store
+    }
+  }
+}
 void cuda_l2_topk_batch(
   const void* base_ptr,
   uint32_t base_dtype,
@@ -744,88 +878,110 @@ void cuda_l2_topk_batch(
   const bool want_dist = (return_dist_env != 0);
 
   const char* km = std::getenv("CUDA_KERNEL_MODE");
-  const bool use_warpmerge = (km && std::string(km) == "warpmerge"); // default baseline
+  const bool use_warpmerge = ( km && std::string(km) == "warpmerge");
+  const bool use_warpmerge2 = (km && std::string(km) == "warpmerge2");
+  int warp_send_m = 8; //default
+  if (const char* s = std::getenv("CUDA_WARP_SEND_M")) warp_send_m = std::atoi(s);
+  if (warp_send_m<1) warp_send_m =1;
+  if (warp_send_m > (int)K) warp_send_m = (int) K;
+
+  ensure_base_on_gpu(base_ptr, base_dtype, N, D);
+  ensure_workspace(Q, D, R, K);
+
+  // output host vectors (ids always; dist optional)
+  out_topk_ids.assign((size_t)Q * (size_t)K, 0xFFFFFFFFu);
+  if (want_dist) out_topk_dist.assign((size_t)Q * (size_t)K, 1e30f);
+  else out_topk_dist.clear();
+
+  // pinned host buffers (optional)
+  const float*    h_q_src   = queries_f32;
+  const uint32_t* h_c_src   = cand_ids;
+  uint32_t*       h_oid_dst = out_topk_ids.data();
+  float*          h_od_dst  = want_dist ? out_topk_dist.data() : nullptr;
+
+  if (use_pinned) {
+    ensure_host_pinned(Q, D, R, K, want_dist);
+
+    // pack into pinned
+    std::memcpy(g_h_q_pinned, queries_f32, (size_t)Q * (size_t)D * sizeof(float));
+    std::memcpy(g_h_cand_pinned, cand_ids, (size_t)Q * (size_t)R * sizeof(uint32_t));
+
+    h_q_src = g_h_q_pinned;
+    h_c_src = g_h_cand_pinned;
+
+    h_oid_dst = g_h_out_id_pinned;
+    h_od_dst  = want_dist ? g_h_out_dist_pinned : nullptr;
+  }
+
+  // events
+  cudaEvent_t ev0, ev1, ev2, ev3;
+  ck(cudaEventCreate(&ev0), "event create");
+  ck(cudaEventCreate(&ev1), "event create");
+  ck(cudaEventCreate(&ev2), "event create");
+  ck(cudaEventCreate(&ev3), "event create");
+
+  ck(cudaEventRecord(ev0, g_stream), "event record 0");
+
+  // H2D async (from pinned if enabled)
+  ck(cudaMemcpyAsync(g_q_dev, h_q_src, (size_t)Q * (size_t)D * sizeof(float),
+                    cudaMemcpyHostToDevice, g_stream), "H2D queries async");
+  ck(cudaMemcpyAsync(g_cand_dev, h_c_src, (size_t)Q * (size_t)R * sizeof(uint32_t),
+                    cudaMemcpyHostToDevice, g_stream), "H2D cand async");
+
+  ck(cudaEventRecord(ev1, g_stream), "event record 1");
+
+  // threads selection (initial)
+  int threads = 256;
+  if (R < 256) threads = 128;
+  if (R < 128) threads = 64;
+  if (R < 64)  threads = 32;
+  if (threads < 32) threads = 32;
+
+  // ---- force threads (C experiment) ----
+  // CUDA_BLOCK_THREADS=0 (auto) | 128 | 256
+  int forced = 0;
+  if (const char* s = std::getenv("CUDA_BLOCK_THREADS")) forced = std::atoi(s);
+  if (forced == 128 || forced == 256) {
+    threads = forced;
+  }
 
 
-    ensure_base_on_gpu(base_ptr, base_dtype, N, D);
-    ensure_workspace(Q, D, R, K);
+  // Get device shmem limit (default 48KB on many GPUs)
+  cudaDeviceProp prop{};
+  ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
+  //const size_t SHMAX = (size_t)prop.sharedMemPerBlock;
+  const bool shmem_optin = (std::getenv("CUDA_SHMEM_OPTIN") && std::atoi(std::getenv("CUDA_SHMEM_OPTIN")) != 0);
+  // SHMAX: either default 48KB or opt-in limit (~99KB on 3080)
+  const size_t SHMAX = shmem_optin ? (size_t)prop.sharedMemPerBlockOptin
+                                  : (size_t)prop.sharedMemPerBlock;
 
-    // output host vectors (ids always; dist optional)
-    out_topk_ids.assign((size_t)Q * (size_t)K, 0xFFFFFFFFu);
-    if (want_dist) out_topk_dist.assign((size_t)Q * (size_t)K, 1e30f);
-    else out_topk_dist.clear();
+  // helper to compute shmem for a given threads
+  /*auto shmem_for = [&](int th)->size_t {
+    const uint32_t nwarps = (uint32_t)((th + 31) / 32);
+    const size_t shmem_base =
+        (size_t)th * (size_t)K * (sizeof(float) + sizeof(uint32_t));
+    const size_t shmem_warpmerge =
+        shmem_base + (size_t)nwarps * (size_t)K * (sizeof(float) + sizeof(uint32_t));
+    return use_warpmerge ? shmem_warpmerge : shmem_base;
+  };
+  */
+  auto shmem_for = [&](int th)->size_t {
+  const uint32_t nwarps = (uint32_t)((th + 31) / 32);
+  const size_t per_list = (sizeof(float) + sizeof(uint32_t)); // 8
 
-    // pinned host buffers (optional)
-    const float*    h_q_src   = queries_f32;
-    const uint32_t* h_c_src   = cand_ids;
-    uint32_t*       h_oid_dst = out_topk_ids.data();
-    float*          h_od_dst  = want_dist ? out_topk_dist.data() : nullptr;
+  const size_t shmem_base = (size_t)th * (size_t)K * per_list;
 
-    if (use_pinned) {
-      ensure_host_pinned(Q, D, R, K, want_dist);
+  const size_t shmem_warpmerge_shared =
+      shmem_base + (size_t)nwarps * (size_t)K * per_list;
 
-      // pack into pinned
-      std::memcpy(g_h_q_pinned, queries_f32, (size_t)Q * (size_t)D * sizeof(float));
-      std::memcpy(g_h_cand_pinned, cand_ids, (size_t)Q * (size_t)R * sizeof(uint32_t));
+  const size_t shmem_warpmerge_noshared =
+      (size_t)nwarps * (size_t)K * per_list;
 
-      h_q_src = g_h_q_pinned;
-      h_c_src = g_h_cand_pinned;
-
-      h_oid_dst = g_h_out_id_pinned;
-      h_od_dst  = want_dist ? g_h_out_dist_pinned : nullptr;
-    }
-
-    // events
-    cudaEvent_t ev0, ev1, ev2, ev3;
-    ck(cudaEventCreate(&ev0), "event create");
-    ck(cudaEventCreate(&ev1), "event create");
-    ck(cudaEventCreate(&ev2), "event create");
-    ck(cudaEventCreate(&ev3), "event create");
-
-    ck(cudaEventRecord(ev0, g_stream), "event record 0");
-
-    // H2D async (from pinned if enabled)
-    ck(cudaMemcpyAsync(g_q_dev, h_q_src, (size_t)Q * (size_t)D * sizeof(float),
-                      cudaMemcpyHostToDevice, g_stream), "H2D queries async");
-    ck(cudaMemcpyAsync(g_cand_dev, h_c_src, (size_t)Q * (size_t)R * sizeof(uint32_t),
-                      cudaMemcpyHostToDevice, g_stream), "H2D cand async");
-
-    ck(cudaEventRecord(ev1, g_stream), "event record 1");
-
-    // threads selection (initial)
-    int threads = 256;
-    if (R < 256) threads = 128;
-    if (R < 128) threads = 64;
-    if (R < 64)  threads = 32;
-    if (threads < 32) threads = 32;
-
-    // ---- force threads (C experiment) ----
-    // CUDA_BLOCK_THREADS=0 (auto) | 128 | 256
-    int forced = 0;
-    if (const char* s = std::getenv("CUDA_BLOCK_THREADS")) forced = std::atoi(s);
-    if (forced == 128 || forced == 256) {
-      threads = forced;
-    }
-
-
-    // Get device shmem limit (default 48KB on many GPUs)
-    cudaDeviceProp prop{};
-    ck(cudaGetDeviceProperties(&prop, 0), "getDeviceProperties");
-    //const size_t SHMAX = (size_t)prop.sharedMemPerBlock;
-    const bool shmem_optin = (std::getenv("CUDA_SHMEM_OPTIN") && std::atoi(std::getenv("CUDA_SHMEM_OPTIN")) != 0);
-    // SHMAX: either default 48KB or opt-in limit (~99KB on 3080)
-    const size_t SHMAX = shmem_optin ? (size_t)prop.sharedMemPerBlockOptin
-                                    : (size_t)prop.sharedMemPerBlock;
-
-    // helper to compute shmem for a given threads
-    auto shmem_for = [&](int th)->size_t {
-      const uint32_t nwarps = (uint32_t)((th + 31) / 32);
-      const size_t shmem_base =
-          (size_t)th * (size_t)K * (sizeof(float) + sizeof(uint32_t));
-      const size_t shmem_warpmerge =
-          shmem_base + (size_t)nwarps * (size_t)K * (sizeof(float) + sizeof(uint32_t));
-      return use_warpmerge ? shmem_warpmerge : shmem_base;
-    };
+  if (use_warpmerge2) return shmem_warpmerge_noshared;
+  if (use_warpmerge)  return shmem_warpmerge_shared;
+  return shmem_base;
+  };
+  const char* mode_str = use_warpmerge2 ? "warpmerge2" : (use_warpmerge ? "warpmerge" : "baseline"); 
 
     int threads_req = threads;
     // clamp threads down until shmem fits
@@ -839,7 +995,7 @@ void cuda_l2_topk_batch(
     std::fprintf(stderr,
       "[cuda_launch_dbg] FAIL K=%u R=%u Q=%u mode=%s threads=%d(req=%d) shmem=%zuB "
       "limit=%zuB (default=%zuB optin=%zuB optin_on=%d)\n",
-      K, R, Q, (use_warpmerge ? "warpmerge" : "baseline"),
+      K, R, Q, mode_str,
       threads, threads_req, shmem_bytes,
       SHMAX,
       (size_t)prop.sharedMemPerBlock,
@@ -866,18 +1022,24 @@ void cuda_l2_topk_batch(
     if (shmem_optin) {
       // Note: must set attribute on the exact kernel symbol being launched.
       if (base_dtype == 2) {
-        if (!use_warpmerge) {
+        if (use_warpmerge2){
           ck(cudaFuncSetAttribute(
-                l2_topk_fp16_kernel<NVDB_CUDA_KMAX>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                (int)shmem_bytes),
-            "set max dynamic shmem (fp16 baseline)");
-        } else {
-          ck(cudaFuncSetAttribute(
+              l2_topk_fp16_kernel_warpmerge_noshared<NVDB_CUDA_KMAX>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize,
+              (int)shmem_bytes),
+              "set max dynamic shmem (fp16 warpmerge2)");
+        }else if(use_warpmerge){
+            ck(cudaFuncSetAttribute(
                 l2_topk_fp16_kernel_warpmerge<NVDB_CUDA_KMAX>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
                 (int)shmem_bytes),
             "set max dynamic shmem (fp16 warpmerge)");
+        }else{
+            ck(cudaFuncSetAttribute(
+                  l2_topk_fp16_kernel<NVDB_CUDA_KMAX>,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                  (int)shmem_bytes),
+              "set max dynamic shmem (fp16 baseline)");
         }
       } else {
         ck(cudaFuncSetAttribute(
@@ -891,42 +1053,44 @@ void cuda_l2_topk_batch(
 
 
     if (base_dtype == 2) {
-      if (!use_warpmerge) {
-        l2_topk_fp16_kernel<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
+      if (use_warpmerge2) {
+        l2_topk_fp16_kernel_warpmerge_noshared<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
           (const __half*)g_base_dev, N, D,
           g_q_dev, Q,
           g_cand_dev, R,
           K,
           g_out_id_dev, g_out_dist_dev,
-          dbg_dev,dbg_q
+          dbg_dev, dbg_q,
+          warp_send_m
         );
-      } else {
+      } else if (use_warpmerge) {
         l2_topk_fp16_kernel_warpmerge<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
           (const __half*)g_base_dev, N, D,
           g_q_dev, Q,
           g_cand_dev, R,
           K,
           g_out_id_dev, g_out_dist_dev,
-          dbg_dev,dbg_q
+          dbg_dev, dbg_q
+        );
+      } else {
+        l2_topk_fp16_kernel<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
+          (const __half*)g_base_dev, N, D,
+          g_q_dev, Q,
+          g_cand_dev, R,
+          K,
+          g_out_id_dev, g_out_dist_dev,
+          dbg_dev, dbg_q
         );
       }
-    } else {
-      l2_topk_fp32_kernel<NVDB_CUDA_KMAX><<<grid, block, shmem_bytes, g_stream>>>(
-        (const float*)g_base_dev, N, D,
-        g_q_dev, Q,
-        g_cand_dev, R,
-        K,
-        g_out_id_dev, g_out_dist_dev
-      );
     }
-
+    
     static bool once=true;
     if (once) {
       once=false;
       std::fprintf(stderr,
         "[cuda_launch_dbg] OK  K=%u R=%u Q=%u mode=%s threads=%d(req=%d) shmem=%zuB "
         "limit=%zuB (default=%zuB optin=%zuB optin_on=%d)\n",
-        K, R, Q, (use_warpmerge ? "warpmerge" : "baseline"),
+        K, R, Q, mode_str,
         threads, threads_req, shmem_bytes,
         SHMAX,
         (size_t)prop.sharedMemPerBlock,

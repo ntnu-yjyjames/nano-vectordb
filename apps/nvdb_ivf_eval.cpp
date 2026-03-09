@@ -739,7 +739,7 @@ int main(int argc, char** argv) {
   auto kvs = [&](const char* key, const std::string& v) {
     std::cout << " " << key << "=" << v;
   };
-
+  std::cout << "\n";
   std::cout << "RESULT";
 
   kvi("refine_k", refine_k);

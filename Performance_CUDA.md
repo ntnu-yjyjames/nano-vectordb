@@ -284,3 +284,42 @@ Using lightweight `clock64` **instrumentation** (sampling `dbg_q=32`) we decompo
 Branch uniformity remains extremely high (~99.9%+) and the deltas are small (≤0.1 pp). The dominant explanatory signals are shared traffic (wavefronts/bank conflicts) and synchronization/scoreboarding stalls, together with the merge-loop work reduction quantified in Table CU6-3.
 
 **Takeaway.** CU6 provides mechanism-level evidence supporting CU5’s headline: **warp-merge wins most strongly when baseline merge work is large enough to amortize warp-merge’s added shared/synchronization overhead.** In this workload, that “sweet spot” is** K=20 with Threads=256 under the default shared-memory regime (Optin=0)**, where warp-merge cuts the merge-loop work by **~50%** and yields the largest kernel-level improvement.
+
+## CU7 — K=30 @ Threads=128: baseline vs warpmerge vs warpmerge2 (sendM=4)
+
+To complement CU6’s “sweet spot” analysis at `Threads=256`, we evaluate **K=30** under the **shared-memory–safe** launch regime (**Threads=128, Optin=0**) to answer a practical question: does the clamp-avoidance variant (warpmerge2) still help when clamp is not the bottleneck? We run **N=30** repeats per variant with identical workload settings (`Q=10000`, `R=500`, `REFINE_K=500`, `nprobe=64`, `CUDA_PINNED=0`, `CUDA_RETURN_DIST=0`). Recall remains stable (**Recall@30 = 0.974** for all three), so performance differences reflect kernel behavior rather than quality drift.
+
+### CU7.1 Headline Δ vs baseline (kernel-only)
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU7_Headline_Delta_Dark.png"> <img alt="Stall breakdown delta (warpmerge - baseline), threads=256 optin=0" src="performance_images/CU7_Headline_Delta_Light.png"> </picture>
+**Figure CU7-A.** Performance Delta vs Baseline (K=30, th=128, N=30)
+We use `refine_kernel_ms_per_q` as the primary signal (kernel-only):
+
+* **WarpMerge vs Baseline:**
+`0.002421 − 0.002792 = −0.000371 ms/q = −0.371 µs/query` (faster)
+
+* **WarpMerge2 (sendM=4) vs Baseline:**
+`0.002843 − 0.002792 = +0.000051 ms/q = +0.051 µs/query` (slower)
+
+The same direction holds for **total refine** (`refine_ms_per_q`): warpmerge improves (**0.002738 vs 0.003112 ms/q**) while warpmerge2 is slightly worse (**0.003160 vs 0.003112 ms/q**). Because **Recall@30 is identical (0.974)** across variants, the observed deltas can be interpreted as pure kernel/launch effects under this regime.
+
+### CU7.2 Component decomposition (clock64, dbg_q=32): why warpmerge wins here but warpmerge2 does not
+
+<picture> <source media="(prefers-color-scheme: dark)" srcset="performance_images/CU7_Decomposition_Dark.png"> <img alt="Stall breakdown delta (warpmerge - baseline), threads=256 optin=0" src="performance_images/CU7_Decomposition_Light.png"> </picture>
+
+**Figure CU7-B.** Component Decomposition (`clock64` breakdown, `dbg_q=32`)
+
+Using lightweight `clock64` instrumentation (sampling dbg_q=32), we decompose the kernel into three components: **distance loop**, **shared write/staging**, and **merge loop**. The component shares show the key mechanism:
+
+* **Baseline:** Distance ≈ **65%**, Shared write/staging ≈ **5%**, Merge ≈ **30%**
+* **WarpMerge:** Distance ≈ **78.5%**, Shared write/staging ≈ **4.5%**, Merge ≈ **17%**
+* **WarpMerge2(sendM=4):** Distance ≈ **76%**, Shared write/staging ≈ **8.5%**, Merge ≈ **15.5%**
+
+These results indicate a clear tradeoff:
+1. **WarpMerge reduces the merge bottleneck at Threads=128.**
+The merge share drops from **~30% → ~17%**, shifting the kernel toward a distance-dominated profile. This aligns with CU7.1 where warpmerge achieves a **clear kernel win (−0.371 µs/q)**.
+
+2. **WarpMerge2 continues to reduce merge share slightly, but increases staging overhead.**
+Warpmerge2 lowers merge from **~17% → ~15.5%**, but staging rises sharply (**~4.5% → ~8.5%**). In the **Threads=128** regime (where clamp is not constraining the launch), that extra overhead is not amortized, matching the **small slowdown** observed in CU7.1 (**+0.051 µs/q**).
+
+**Takeaway.** For **K=30, Threads=128 (Optin=0)**, **WarpMerge is the preferred kernel:** it preserves recall and improves kernel-only latency by **~0.371 µs/query**. **WarpMerge2(sendM=4)** is not beneficial in this non-clamped regime and is better framed as a **targeted clamp-avoidance strategy** for high-thread/high-shared-memory configurations (e.g., `Threads=256` at large `K`), rather than a universal replacement for warpmerge.
